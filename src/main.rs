@@ -18,7 +18,11 @@ use crate::key_store::{load_private_key, save_private_key};
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Parser, Debug)]
-#[command(name = "encjson-rs", about = "Encrypted JSON helper using Monocypher")]
+#[command(
+    name = "encjson-rs",
+    about = "Encrypted JSON helper using Monocypher",
+    arg_required_else_help = true
+)]
 struct Cli {
     /// Print version and exit (like `encjson -v`)
     #[arg(short = 'v', long = "version")]
