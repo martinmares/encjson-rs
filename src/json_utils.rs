@@ -122,4 +122,65 @@ mod tests {
         assert!(exports.contains("export DB_PASS=\"tajne-heslo-do-db\""));
         assert!(exports.contains("export KAFKA_PASS=\"tajne-heslo-do-kafka\""));
     }
+
+    #[test]
+    fn env_exports_escapes_backslashes() {
+        // Unixy string s backslashem (třeba nějaký regex nebo escape)
+        let v = json!({
+            "environment": {
+                "P": r#"/tmp/foo\bar"#,
+            }
+        });
+
+        let exports = env_exports(&v).unwrap();
+
+        // export P="/tmp/foo\\bar"
+        assert_eq!(exports, "export P=\"/tmp/foo\\\\bar\"\n");
+    }
+
+    #[test]
+    fn env_exports_escapes_quotes_and_dollar() {
+        let v = json!({
+            "environment": {
+                "P": r#"He said: "hi" and $HOME"#,
+            }
+        });
+
+        let exports = env_exports(&v).unwrap();
+
+        // export P="He said: \"hi\" and \$HOME"
+        assert_eq!(exports, "export P=\"He said: \\\"hi\\\" and \\$HOME\"\n");
+    }
+
+    #[test]
+    fn env_exports_escapes_backticks() {
+        let v = json!({
+            "environment": {
+                "P": "echo `uname -s`",
+            }
+        });
+
+        let exports = env_exports(&v).unwrap();
+
+        // export P="echo \`uname -s\`"
+        assert_eq!(exports, "export P=\"echo \\`uname -s\\`\"\n");
+    }
+
+    #[test]
+    fn env_exports_escapes_combo_of_specials() {
+        let v = json!({
+            "environment": {
+                "P": r#"`weird "$VALUE" path\with\stuff`"#,
+            }
+        });
+
+        let exports = env_exports(&v).unwrap();
+
+        // originál: `weird "$VALUE" path\with\stuff`
+        // po escapu: \`weird \"\$VALUE\" path\\with\\stuff\`
+        assert_eq!(
+            exports,
+            "export P=\"\\`weird \\\"\\$VALUE\\\" path\\\\with\\\\stuff\\`\"\n"
+        );
+    }
 }
