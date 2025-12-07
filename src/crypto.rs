@@ -3,7 +3,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use mini_monocypher::{
     ErrorKind, crypto_aead_lock, crypto_aead_unlock, crypto_blake2b, crypto_x25519,
 };
-use rand::RngCore;
+use rand::rand_core::TryRngCore;
 use rand::rngs::OsRng;
 use regex::Regex;
 use thiserror::Error;
@@ -100,7 +100,7 @@ impl SecureBox {
 
         // náhodný nonce 24 B
         let mut nonce = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce);
+        OsRng.try_fill_bytes(&mut nonce).expect("OS RNG failed");
 
         // ciphertext a MAC
         let mut cipher = vec![0u8; plaintext.len()];
@@ -165,8 +165,11 @@ impl SecureBox {
 pub fn generate_key_pair() -> (String, String) {
     let mut priv_bytes = [0u8; KEY_LEN];
     let mut pub_bytes = [0u8; KEY_LEN];
-    OsRng.fill_bytes(&mut priv_bytes);
-    OsRng.fill_bytes(&mut pub_bytes);
+
+    OsRng
+        .try_fill_bytes(&mut priv_bytes)
+        .expect("OS RNG failed");
+    OsRng.try_fill_bytes(&mut pub_bytes).expect("OS RNG failed");
 
     let priv_hex = hex::encode(priv_bytes);
     let pub_hex = hex::encode(pub_bytes);
