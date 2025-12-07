@@ -18,12 +18,9 @@ use crate::key_store::{load_private_key, save_private_key};
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "encjson",
-    about = "Encrypted JSON (encrypt/decrypt) přes Monocypher"
-)]
+#[command(name = "encjson-rs", about = "Encrypted JSON helper using Monocypher")]
 struct Cli {
-    /// Print version and exit (jako `encjson -v`)
+    /// Print version and exit (like `encjson -v`)
     #[arg(short = 'v', long = "version")]
     version: bool,
 
@@ -33,45 +30,50 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Vygeneruje nový pár public/private klíčů
+    /// Generate a new public/private key pair
     Init {
-        /// Volitelný adresář pro klíče (jinak ENCJSON_KEYDIR nebo ~/.encjson)
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is ~/.encjson)
         #[arg(short, long)]
         keydir: Option<PathBuf>,
     },
 
-    /// Zašifruje všechny string hodnoty v JSONu
+    /// Encrypt all string values in a JSON file
     Encrypt {
-        /// Vstupní soubor (jinak čte ze stdin)
+        /// Input file (otherwise reads from stdin)
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Přepsat vstupní soubor (in-place)
+        /// Overwrite the input file in place
         #[arg(short = 'w', long)]
         write: bool,
 
-        /// Volitelný keydir (přepíše ENCJSON_KEYDIR)
+        /// Optional key directory (overrides ENCJSON_KEYDIR)
         #[arg(long)]
         keydir: Option<PathBuf>,
     },
 
-    /// Dešifruje EncJson stringy v JSONu
+    /// Decrypt EncJson strings in a JSON file
     Decrypt {
+        /// Input file (otherwise reads from stdin)
         #[arg(short, long)]
         file: Option<PathBuf>,
 
+        /// Overwrite the input file in place
         #[arg(short = 'w', long)]
         write: bool,
 
+        /// Optional key directory (overrides ENCJSON_KEYDIR)
         #[arg(long)]
         keydir: Option<PathBuf>,
     },
 
-    /// Vypíše export řádky z `env`/`environment` v JSONu
+    /// Print export lines from the `env`/`environment` section
     Env {
+        /// Input file (otherwise reads from stdin)
         #[arg(short, long)]
         file: Option<PathBuf>,
 
+        /// Optional key directory (overrides ENCJSON_KEYDIR)
         #[arg(long)]
         keydir: Option<PathBuf>,
     },
@@ -80,7 +82,7 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
 
-    // Podpora `encjson -v`
+    // Support `encjson -v`
     if cli.version {
         // CARGO_PKG_VERSION = verze z Cargo.toml
         println!("encjson {} (rust)", env!("CARGO_PKG_VERSION"));
