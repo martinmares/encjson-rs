@@ -282,6 +282,63 @@ The tool finds the private key in this order:
 
 If no key can be found, the command fails with a clear error.
 
+## Windows specifics
+
+`encjson-rs` is primarily developed and tested on Unix-like systems, but it also works on Windows (including cross-compiled binaries).
+
+### Emoji output in `init`
+
+On Unix-like systems, `encjson init` prints some small emoji decorations:
+
+```text
+Generated key pair (hex):
+ => 🍺 public:  ...
+ => 🔑 private: ...
+ => 💾 saved to: ...
+```
+
+On Windows consoles (especially older `cmd.exe`), Unicode/emoji rendering can be unreliable. To avoid broken glyphs:
+
+- On Windows builds, `encjson init` automatically falls back to **ASCII-only** output:
+
+  ```text
+  Generated key pair (hex):
+   => public:  ...
+   => private: ...
+   => saved to: ...
+  ```
+
+- On Unix-like systems, you can also disable emoji explicitly by setting:
+
+  ```bash
+  ENCJSON_NO_EMOJI=1 encjson init
+  ```
+
+This makes the output more predictable in logs and on terminals with limited font/encoding support.
+
+### Key directory on Windows
+
+The default key directory is determined as follows:
+
+1. If `ENCJSON_KEYDIR` is set, it is always used (on all platforms).
+2. Otherwise:
+   - On Unix-like systems:
+     - `~/.encjson` (based on `$HOME`).
+   - On Windows:
+     - If `HOME` is set (e.g. Git Bash / MSYS), use `%HOME%\.encjson`.
+     - Else, if `USERPROFILE` is set, use `%USERPROFILE%\.encjson`  
+       (typical case: `C:\Users\<name>\.encjson`).
+     - Else, if both `HOMEDRIVE` and `HOMEPATH` are set, use `%HOMEDRIVE%%HOMEPATH%\.encjson`.
+     - As a last-resort fallback, `.\.encjson` in the current working directory.
+
+In practice, on a “normal” Windows 10/11 installation, the default ends up under the user’s profile directory, e.g.:
+
+```text
+C:\Users\YourName\.encjson
+```
+
+If you want complete control (for example, to share a key directory between WSL, Git Bash and native Windows binaries), set `ENCJSON_KEYDIR` explicitly on that machine.
+
 ## Migration from the Crystal version
 
 The original Crystal implementation and this Rust implementation use **different key derivation / encryption format** under the hood:
