@@ -127,9 +127,19 @@ fn cmd_init(keydir: Option<PathBuf>) -> Result<()> {
     let path = save_private_key(&pub_hex, &priv_hex, keydir.as_deref())?;
 
     println!("Generated key pair (hex):");
-    println!(" => 🍺 public:  {}", pub_hex);
-    println!(" => 🔑 private: {}", priv_hex);
-    println!(" => 💾 saved to: {}", path.display());
+
+    // Na Windows a/nebo pokud je nastaveno ENCJSON_NO_EMOJI -> ASCII fallback
+    let no_emoji = cfg!(target_os = "windows") || std::env::var("ENCJSON_NO_EMOJI").is_ok();
+
+    if no_emoji {
+        println!(" => public:  {}", pub_hex);
+        println!(" => private: {}", priv_hex);
+        println!(" => saved to: {}", path.display());
+    } else {
+        println!(" => 🍺 public:  {}", pub_hex);
+        println!(" => 🔑 private: {}", priv_hex);
+        println!(" => 💾 saved to: {}", path.display());
+    }
 
     Ok(())
 }
