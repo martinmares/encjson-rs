@@ -4,15 +4,48 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 
+#[cfg(not(windows))]
+fn home_dir() -> Option<PathBuf> {
+    std::env::var("HOME").ok().map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn home_dir() -> Option<PathBuf> {
+    use std::env;
+
+    // 1) Pokud je nastavené HOME (např. Git Bash / MSYS), použij ho
+    if let Ok(home) = env::var("HOME") {
+        if !home.is_empty() {
+            return Some(PathBuf::from(home));
+        }
+    }
+
+    // 2) USERPROFILE je nejčastější "domov" na Windows
+    if let Ok(up) = env::var("USERPROFILE") {
+        if !up.is_empty() {
+            return Some(PathBuf::from(up));
+        }
+    }
+
+    // 3) HOMEDRIVE + HOMEPATH fallback (např. C:\Users\something)
+    let drive = env::var("HOMEDRIVE").unwrap_or_default();
+    let path = env::var("HOMEPATH").unwrap_or_default();
+    if !drive.is_empty() && !path.is_empty() {
+        return Some(PathBuf::from(format!("{drive}{path}")));
+    }
+
+    None
+}
+
 /// Defaultní adresář pro klíče (~/.encjson nebo to, co je v ENCJSON_KEYDIR).
 pub fn default_key_dir() -> PathBuf {
     if let Ok(dir) = env::var("ENCJSON_KEYDIR") {
         return PathBuf::from(dir);
     }
-    if let Ok(home) = env::var("HOME") {
-        return PathBuf::from(home).join(".encjson");
+    if let Some(home) = home_dir() {
+        return home.join(".encjson");
     }
-    // nouzový fallback
+    // nouzový fallback - když fakt není žádný home
     PathBuf::from(".encjson")
 }
 
