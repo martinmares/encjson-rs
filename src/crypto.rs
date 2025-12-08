@@ -1,46 +1,52 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use mini_monocypher::{
-    ErrorKind, crypto_aead_lock, crypto_aead_unlock, crypto_blake2b, crypto_x25519,
-};
+use blake2::{Blake2b512, Digest};
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use lazy_static::lazy_static;
 use rand::rand_core::TryRngCore;
 use rand::rngs::OsRng;
 use regex::Regex;
 use thiserror::Error;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 const API_VERSION: &str = "2.0";
 
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
-const MAC_LEN: usize = 16;
+const MAC_LEN: usize = 16; // Poly1305 tag length
 
 #[derive(Debug, Error)]
 pub enum CryptoError {
-    #[error("hex decode error: {0}")]
+    #[error("invalid hex-encoded key: {0}")]
     Hex(#[from] hex::FromHexError),
 
-    #[error("base64 decode error: {0}")]
+    #[error("invalid EncJson payload (base64 decode failed): {0}")]
     Base64(#[from] base64::DecodeError),
 
-    #[error("AEAD decrypt error: {0:?}")]
-    AeadDecrypt(ErrorKind),
+    #[error(
+        "decryption failed: ciphertext may be corrupted, use a wrong key, or come from an incompatible encjson version"
+    )]
+    AeadDecrypt,
 
     #[error("invalid data: {0}")]
     Invalid(String),
 
-    #[error("utf8 error: {0}")]
+    #[error("invalid UTF-8 in decrypted value: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
 }
 
-/// Symetrický box – drží derivovaný 32B klíč pro AEAD.
+/// Symmetric "box" derived from a static X25519 keypair.
 pub struct SecureBox {
     key: [u8; KEY_LEN],
 }
 
 impl SecureBox {
-    /// Vytvoří SecureBox ze 64-hex private a public klíče.
+    /// Create SecureBox from 64-hex private and public keys.
     ///
-    /// shared_key = Blake2b( X25519(priv, pub) )  (32B)
+    /// Derives a 32-byte symmetric key as:
+    ///   shared = X25519(private, public)
+    ///   key    = Blake2b(shared)[0..32]
     pub fn new_from_hex(private_hex: &str, public_hex: &str) -> Result<Self, CryptoError> {
         let priv_vec = hex::decode(private_hex)?;
         let pub_vec = hex::decode(public_hex)?;
@@ -56,29 +62,32 @@ impl SecureBox {
         priv_arr.copy_from_slice(&priv_vec);
         pub_arr.copy_from_slice(&pub_vec);
 
-        // X25519
-        let mut shared_secret = [0u8; KEY_LEN];
-        crypto_x25519(&mut shared_secret, &priv_arr, &pub_arr);
+        let secret = StaticSecret::from(priv_arr);
+        let public = PublicKey::from(pub_arr);
 
-        // Blake2b KDF -> 32B symetrický klíč
+        let shared = secret.diffie_hellman(&public);
+        let shared_bytes = shared.as_bytes();
+
+        // Blake2b KDF -> 32B symmetric key
+        let digest = Blake2b512::digest(shared_bytes);
         let mut key = [0u8; KEY_LEN];
-        crypto_blake2b(&mut key, &shared_secret);
+        key.copy_from_slice(&digest[..KEY_LEN]);
 
         Ok(SecureBox { key })
     }
 
-    /// Vrací true, pokud je string ve formátu EncJson[@api=...:@box=...]
+    /// Returns true if the string is in EncJson[@api=...:@box=...] format.
     fn is_encrypted(val: &str) -> bool {
-        lazy_static::lazy_static! {
+        lazy_static! {
             static ref ENCJSON_RE: Regex =
                 Regex::new(r"(?i)^EncJson\[@api=(.*):@box=(.*)\]$").unwrap();
         }
         ENCJSON_RE.is_match(val)
     }
 
-    /// Získá jen obsah @box=... nebo vrátí celý string, pokud pattern nesedí.
+    /// Extracts only the @box=... payload, or returns the whole string if pattern does not match.
     fn extract_box(val: &str) -> &str {
-        lazy_static::lazy_static! {
+        lazy_static! {
             static ref ENCJSON_RE: Regex =
                 Regex::new(r"(?i)^EncJson\[@api=(.*):@box=(.*)\]$").unwrap();
         }
@@ -89,44 +98,53 @@ impl SecureBox {
             .unwrap_or(val)
     }
 
-    /// Zašifruje hodnotu (string pro JSON). Pokud už je EncJson[…], nechá ji být.
+    /// Encrypts a string value for JSON.
+    ///
+    /// If the value is already in EncJson[...] format, it is returned unchanged.
     pub fn encrypt_value(&self, val: &str) -> Result<String, CryptoError> {
         if Self::is_encrypted(val) {
-            // už zašifrované - chováme se stejně jako původní encjson
+            // already encrypted – behave like the original tool
             return Ok(val.to_string());
         }
 
         let plaintext = val.as_bytes();
 
-        // náhodný nonce 24 B
-        let mut nonce = [0u8; NONCE_LEN];
-        OsRng.try_fill_bytes(&mut nonce).expect("OS RNG failed");
+        // random 24-byte nonce
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        OsRng
+            .try_fill_bytes(&mut nonce_bytes)
+            .expect("OS RNG failed");
 
-        // ciphertext a MAC
-        let mut cipher = vec![0u8; plaintext.len()];
-        let mut mac = [0u8; MAC_LEN];
+        let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
+            .map_err(|_| CryptoError::Invalid("invalid key length".into()))?;
+        let nonce = XNonce::from_slice(&nonce_bytes);
 
-        crypto_aead_lock(
-            &mut cipher,
-            &mut mac,
-            &self.key,
-            &nonce,
-            None, // žádné AAD
-            plaintext,
-        );
+        // ciphertext || tag (Poly1305, 16 bytes)
+        let mut ct_and_tag = cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|_| CryptoError::Invalid("encryption failed".into()))?;
 
-        // nonce || cipher || mac
-        let mut buf = Vec::with_capacity(NONCE_LEN + cipher.len() + MAC_LEN);
-        buf.extend_from_slice(&nonce);
-        buf.extend_from_slice(&cipher);
-        buf.extend_from_slice(&mac);
+        if ct_and_tag.len() < MAC_LEN {
+            return Err(CryptoError::Invalid(
+                "ciphertext too short (missing tag)".into(),
+            ));
+        }
+
+        // Split into ciphertext and tag to keep the layout: nonce || ciphertext || mac
+        let tag = ct_and_tag.split_off(ct_and_tag.len() - MAC_LEN);
+        let ct = ct_and_tag;
+
+        let mut buf = Vec::with_capacity(NONCE_LEN + ct.len() + MAC_LEN);
+        buf.extend_from_slice(&nonce_bytes);
+        buf.extend_from_slice(&ct);
+        buf.extend_from_slice(&tag);
 
         let b64 = B64.encode(&buf);
 
         Ok(format!("EncJson[@api={}:@box={}]", API_VERSION, b64))
     }
 
-    /// Dešifruje hodnotu. Pokud není ve formátu EncJson[…], vrací původní string.
+    /// Decrypts a value. If it is not in EncJson[...] format, returns the original string.
     pub fn decrypt_value(&self, val: &str) -> Result<String, CryptoError> {
         if !Self::is_encrypted(val) {
             return Ok(val.to_string());
@@ -137,31 +155,36 @@ impl SecureBox {
 
         if bytes.len() < NONCE_LEN + MAC_LEN {
             return Err(CryptoError::Invalid(
-                "ciphertext too short (nonce+cipher+mac)".into(),
+                "ciphertext too short (nonce+cipher+tag)".into(),
             ));
         }
 
         let nonce_slice = &bytes[..NONCE_LEN];
         let cipher_slice = &bytes[NONCE_LEN..bytes.len() - MAC_LEN];
-        let mac_slice = &bytes[bytes.len() - MAC_LEN..];
+        let tag_slice = &bytes[bytes.len() - MAC_LEN..];
 
-        let mut nonce = [0u8; NONCE_LEN];
-        nonce.copy_from_slice(nonce_slice);
+        let mut ct_and_tag = Vec::with_capacity(cipher_slice.len() + MAC_LEN);
+        ct_and_tag.extend_from_slice(cipher_slice);
+        ct_and_tag.extend_from_slice(tag_slice);
 
-        let mut mac = [0u8; MAC_LEN];
-        mac.copy_from_slice(mac_slice);
+        let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
+            .map_err(|_| CryptoError::Invalid("invalid key length".into()))?;
+        let nonce = XNonce::from_slice(nonce_slice);
 
-        let mut plain = vec![0u8; cipher_slice.len()];
+        let plain_bytes = cipher
+            .decrypt(nonce, ct_and_tag.as_ref())
+            .map_err(|_| CryptoError::AeadDecrypt)?;
 
-        crypto_aead_unlock(&mut plain, &mac, &self.key, &nonce, None, cipher_slice)
-            .map_err(CryptoError::AeadDecrypt)?;
-
-        let s = String::from_utf8(plain)?;
+        let s = String::from_utf8(plain_bytes)?;
         Ok(s)
     }
 }
 
-/// Generuje náhodný pair (private, public) ve formě hex stringů.
+/// Generate a random (private, public) pair as 64-hex strings.
+///
+/// NOTE: This does *not* derive the public key from the private key on the
+/// X25519 curve. It generates two independent random 32-byte values, to stay
+/// compatible with the original `encjson` design.
 pub fn generate_key_pair() -> (String, String) {
     let mut priv_bytes = [0u8; KEY_LEN];
     let mut pub_bytes = [0u8; KEY_LEN];
@@ -181,7 +204,7 @@ pub fn generate_key_pair() -> (String, String) {
 mod tests {
     use super::*;
 
-    // tvoje ukázkové klíče z dotazu
+    // example keys from the original discussion
     const PUBLIC_KEY: &str = "4c016009ce7246bebb08ec6856e76839a5c690cf01b30357914020aac9eebc8b";
     const PRIVATE_KEY: &str = "24e55b25c598d4df78387de983b455144e197e3e63239d0c1fc92f862bbd7c0c";
 
