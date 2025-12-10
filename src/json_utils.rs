@@ -67,8 +67,42 @@ pub fn env_exports(root: &Value) -> Result<String, CryptoError> {
 }
 
 /// Export environment variables as .env format (no `export` prefix).
+/// Export environment variables as .env format (no "export" and no quotes).
 pub fn dotenv_exports(root: &Value) -> Result<String, CryptoError> {
-    env_exports_internal(root, false)
+    let obj = root
+        .as_object()
+        .ok_or_else(|| CryptoError::Invalid("root JSON must be an object".to_string()))?;
+
+    let env_obj = obj
+        .get("environment")
+        .or_else(|| obj.get("env"))
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            CryptoError::Invalid("JSON must contain `environment` or `env` object".to_string())
+        })?;
+
+    let mut out = String::new();
+
+    for (key, val) in env_obj {
+        match val {
+            // pro strings: KEY=value (bez uvozovek, bez escapování)
+            Value::String(s) => {
+                out.push_str(key);
+                out.push('=');
+                out.push_str(s);
+                out.push('\n');
+            }
+            // pro non-strings: KEY=<json>
+            other => {
+                out.push_str(key);
+                out.push('=');
+                out.push_str(&other.to_string());
+                out.push('\n');
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 fn env_exports_internal(root: &Value, with_export: bool) -> Result<String, CryptoError> {
@@ -187,10 +221,11 @@ mod tests {
         });
 
         let dotenv = dotenv_exports(&v).unwrap();
-        assert!(dotenv.contains("DB_PASS=\"secret\""));
+        assert!(dotenv.contains("DB_PASS=secret"));
         assert!(dotenv.contains("DB_PORT=5432"));
         assert!(dotenv.contains("FLAG=true"));
         assert!(!dotenv.contains("export "));
+        assert!(!dotenv.contains('"'));
     }
 
     #[test]

@@ -57,6 +57,11 @@ enum Commands {
         #[arg(short, long)]
         file: Option<PathBuf>,
 
+        /// Optional positional input (e.g. "-" for stdin).
+        /// Conflicts with -f/--file to avoid ambiguity.
+        #[arg(value_name = "INPUT", conflicts_with = "file")]
+        input: Option<PathBuf>,
+
         /// Overwrite the input file in place
         #[arg(short = 'w', long)]
         write: bool,
@@ -133,9 +138,10 @@ fn run(command: Commands) -> Result<()> {
         Commands::Init { keydir } => cmd_init(keydir),
         Commands::Encrypt {
             file,
+            input,
             write,
             keydir,
-        } => cmd_encrypt(file, write, keydir),
+        } => cmd_encrypt(file, input, write, keydir),
         Commands::Decrypt {
             file,
             input,
@@ -143,7 +149,6 @@ fn run(command: Commands) -> Result<()> {
             keydir,
             output,
         } => cmd_decrypt(file, input, write, keydir, output),
-        // `env` pouze přesměrujeme na decrypt -o shell
         Commands::Env { file, keydir } => {
             cmd_decrypt(file, None, false, keydir, OutputFormat::Shell)
         }
@@ -172,8 +177,16 @@ fn cmd_init(keydir: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_encrypt(file: Option<PathBuf>, write: bool, keydir: Option<PathBuf>) -> Result<()> {
-    let mut value = read_json(file.as_ref())?;
+fn cmd_encrypt(
+    file: Option<PathBuf>,
+    input: Option<PathBuf>,
+    write: bool,
+    keydir: Option<PathBuf>,
+) -> Result<()> {
+    // sjednotíme -f a pozicní argument (např. "-")
+    let effective_path = file.or(input);
+
+    let mut value = read_json(effective_path.as_ref())?;
 
     let public_key_hex = extract_public_key(&value)?;
     let private_key_hex = load_private_key(public_key_hex, keydir.as_deref())?;
@@ -181,7 +194,7 @@ fn cmd_encrypt(file: Option<PathBuf>, write: bool, keydir: Option<PathBuf>) -> R
     let sb = SecureBox::new_from_hex(&private_key_hex, public_key_hex)?;
     transform_json(&mut value, &sb, TransformMode::Encrypt)?;
 
-    write_json_to(file.as_ref(), write, &value)
+    write_json_to(effective_path.as_ref(), write, &value)
 }
 
 fn cmd_decrypt(
