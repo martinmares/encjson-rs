@@ -36,7 +36,7 @@ where the payload is a base64-encoded concatenation of:
 - ciphertext (`XChaCha20`),
 - 16-byte authentication tag (`Poly1305`).
 
-The symmetric key is derived from the public/private key pair using **X25519** + **BLAKE2b**, and encryption uses **XChaCha20-Poly1305** AEAD — all implemented in pure Rust (no C libraries).
+The symmetric key is derived from the public/private key pair using **X25519** + **BLAKE2b**, and encryption uses **XChaCha20-Poly1305** AEAD - all implemented in pure Rust (no C libraries).
 
 ## Cryptography
 
@@ -230,9 +230,24 @@ encjson decrypt -f env.secured.json -w
 
 The `-o/--output` flag controls the output format:
 
-- `-o json` (default) – decrypted JSON (as above)
-- `-o shell` – shell `export` lines, suitable for `eval`
-- `-o dot-env` – `.env` file format (`KEY="value"` per line)
+- `-o json` (default) - decrypted JSON (as above)
+- `-o shell` - shell `export` lines, suitable for `eval`
+- `-o dot-env` - `.env` file format (`KEY="value"` per line)
+
+#### Reading from stdin
+
+If you do not specify `-f`, `encjson` reads JSON from stdin:
+
+```bash
+cat env.secured.json | encjson decrypt -o shell
+```
+
+You can also explicitly use `-f -` to mean “read from stdin” (Unix-style):
+
+```bash
+cat env.secured.json | encjson decrypt -f - -o shell
+cat env.secured.json | encjson decrypt -f - > decrypted.json
+```
 
 Examples:
 
@@ -240,6 +255,10 @@ Examples:
 
 ```bash
 encjson decrypt -f env.secured.json -o shell
+# or stdin:
+cat env.secured.json | encjson decrypt -o shell
+# or explicitly stdin:
+cat env.secured.json | encjson decrypt -f - -o shell
 ```
 
 Output:
@@ -253,6 +272,8 @@ This is safe to use with:
 
 ```bash
 eval "$(encjson decrypt -f env.secured.json -o shell)"
+# or:
+eval "$(cat env.secured.json | encjson decrypt -o shell)"
 ```
 
 Special characters like `\`, `"`, `` ` `` and `$` are escaped so that the export lines are shell-safe.
@@ -261,6 +282,8 @@ Special characters like `\`, `"`, `` ` `` and `$` are escaped so that the export
 
 ```bash
 encjson decrypt -f env.secured.json -o dot-env > .env
+# or:
+cat env.secured.json | encjson decrypt -o dot-env > .env
 ```
 
 Output (in `.env`):
@@ -289,6 +312,8 @@ The recommended way to export environment variables from the JSON is:
 
 ```bash
 encjson decrypt -f env.secured.json -o shell
+# or:
+cat env.secured.json | encjson decrypt -o shell
 ```
 
 or directly:
@@ -375,7 +400,7 @@ The default key directory is determined as follows:
      - `~/.encjson` (based on `$HOME`).
    - On Windows:
      - If `HOME` is set (e.g. Git Bash / MSYS), use `%HOME%\.encjson`.
-     - Else, if `USERPROFILE` is set, use `%USERPROFILE%\.encjson`  
+     - Else, if `USERPROFILE` is set, use `%USERPROFILE%\.encjson`
        (typical case: `C:\Users\<name>\.encjson`).
      - Else, if both `HOMEDRIVE` and `HOMEPATH` are set, use `%HOMEDRIVE%%HOMEPATH%\.encjson`.
      - As a last-resort fallback, `.\.encjson` in the current working directory.
