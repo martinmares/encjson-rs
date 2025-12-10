@@ -34,11 +34,11 @@ struct Cli {
 
 #[derive(Clone, Debug, ValueEnum)]
 enum OutputFormat {
-    /// JSON (default) – decrypted JSON to stdout or back to file with -w
+    /// JSON (default) - decrypted JSON to stdout or back to file with -w
     Json,
-    /// Shell `export` lines – suitable for `eval "$(encjson decrypt -o shell ...)"`,
+    /// Shell `export` lines - suitable for `eval "$(encjson decrypt -o shell ...)"`,
     Shell,
-    /// .env format – lines like `VAR="value"`
+    /// .env format - lines like `VAR="value"`
     DotEnv,
 }
 
@@ -74,9 +74,17 @@ enum Commands {
     ///   -o shell               -> shell export lines
     ///   -o dot-env             -> .env file format
     Decrypt {
-        /// Input file (otherwise reads from stdin)
+        /// Input file (otherwise reads from stdin).
+        ///
+        /// You can also pass "-" as a positional argument to read from stdin:
+        ///   encjson decrypt -o shell -
         #[arg(short, long)]
         file: Option<PathBuf>,
+
+        /// Optional positional input (e.g. "-" for stdin).
+        /// Conflicts with -f/--file to avoid ambiguity.
+        #[arg(value_name = "INPUT", conflicts_with = "file")]
+        input: Option<PathBuf>,
 
         /// Overwrite the input file in place (only valid with -o json)
         #[arg(short = 'w', long)]
@@ -130,12 +138,15 @@ fn run(command: Commands) -> Result<()> {
         } => cmd_encrypt(file, write, keydir),
         Commands::Decrypt {
             file,
+            input,
             write,
             keydir,
             output,
-        } => cmd_decrypt(file, write, keydir, output),
+        } => cmd_decrypt(file, input, write, keydir, output),
         // `env` pouze přesměrujeme na decrypt -o shell
-        Commands::Env { file, keydir } => cmd_decrypt(file, false, keydir, OutputFormat::Shell),
+        Commands::Env { file, keydir } => {
+            cmd_decrypt(file, None, false, keydir, OutputFormat::Shell)
+        }
     }
 }
 
@@ -175,6 +186,7 @@ fn cmd_encrypt(file: Option<PathBuf>, write: bool, keydir: Option<PathBuf>) -> R
 
 fn cmd_decrypt(
     file: Option<PathBuf>,
+    input: Option<PathBuf>,
     write: bool,
     keydir: Option<PathBuf>,
     output: OutputFormat,
@@ -184,7 +196,11 @@ fn cmd_decrypt(
         return Err(Error::InvalidWriteForOutput);
     }
 
-    let mut value = read_json(file.as_ref())?;
+    // `file` má přednost (pokud bys někdy zrušil conflicts_with), ale
+    // díky conflicts_with se stejně nemůžou vyskytovat současně.
+    let effective_path = file.or(input);
+
+    let mut value = read_json(effective_path.as_ref())?;
 
     let public_key_hex = extract_public_key(&value)?;
     let private_key_hex = load_private_key(public_key_hex, keydir.as_deref())?;
@@ -193,7 +209,7 @@ fn cmd_decrypt(
     transform_json(&mut value, &sb, TransformMode::Decrypt)?;
 
     match output {
-        OutputFormat::Json => write_json_to(file.as_ref(), write, &value),
+        OutputFormat::Json => write_json_to(effective_path.as_ref(), write, &value),
         OutputFormat::Shell => {
             let exports = env_exports(&value)?;
             print!("{exports}");
@@ -209,7 +225,7 @@ fn cmd_decrypt(
 
 fn read_json(file: Option<&PathBuf>) -> Result<Value> {
     let text = match file {
-        // explicitní stdin: -f -
+        // explicitní stdin: -f - nebo pozicní "-"
         Some(path) if path.as_os_str() == OsStr::new("-") => {
             let mut buf = String::new();
             io::stdin().read_to_string(&mut buf)?;
@@ -217,7 +233,7 @@ fn read_json(file: Option<&PathBuf>) -> Result<Value> {
         }
         // běžný soubor
         Some(path) => fs::read_to_string(path)?,
-        // bez -f => stdin (stávající chování)
+        // bez -f a bez pozicního argumentu => stdin
         None => {
             let mut buf = String::new();
             io::stdin().read_to_string(&mut buf)?;

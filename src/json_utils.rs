@@ -137,7 +137,7 @@ mod tests {
             }
         });
 
-        // Dummy key pair – just needs to be valid hex of correct length.
+        // Dummy key pair - just needs to be valid hex of correct length.
         let sb = SecureBox::new_from_hex(
             "24e55b25c598d4df78387de983b455144e197e3e63239d0c1fc92f862bbd7c0c",
             "91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640",
