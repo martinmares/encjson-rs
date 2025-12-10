@@ -3,12 +3,12 @@ mod error;
 mod json_utils;
 mod key_store;
 
+use clap::{Parser, Subcommand, ValueEnum};
+use serde_json::Value;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
-
-use clap::{Parser, Subcommand, ValueEnum};
-use serde_json::Value;
 
 use crate::crypto::{SecureBox, generate_key_pair};
 use crate::error::Error;
@@ -209,7 +209,15 @@ fn cmd_decrypt(
 
 fn read_json(file: Option<&PathBuf>) -> Result<Value> {
     let text = match file {
+        // explicitní stdin: -f -
+        Some(path) if path.as_os_str() == OsStr::new("-") => {
+            let mut buf = String::new();
+            io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
+        // běžný soubor
         Some(path) => fs::read_to_string(path)?,
+        // bez -f => stdin (stávající chování)
         None => {
             let mut buf = String::new();
             io::stdin().read_to_string(&mut buf)?;
