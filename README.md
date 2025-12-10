@@ -100,8 +100,8 @@ Properties:
 
 - Generate random public/private key pairs (`encjson init`)
 - Encrypt JSON files in place or to stdout (`encjson encrypt`)
-- Decrypt JSON files (`encjson decrypt`)
-- Export environment variables from JSON (`encjson env`)
+- Decrypt JSON files with multiple output formats (`encjson decrypt -o json|shell|dot-env`)
+- Export environment variables from JSON as shell exports or .env format (`encjson decrypt -o shell` / `encjson decrypt -o dot-env`)
 - Uses `ENCJSON_KEYDIR` and `ENCJSON_PRIVATE_KEY` in a simple, predictable way
 - Pure Rust implementation, no C libraries or `libclang` required
 - Simple text format, suitable for committing encrypted configs into Git
@@ -216,46 +216,30 @@ Notes:
 
 ### 3. Decrypt a JSON file (`decrypt`)
 
-To decrypt back to plain JSON:
+By default, `decrypt` prints decrypted JSON:
 
 ```bash
 encjson decrypt -f env.secured.json
 ```
 
-By default, the result is printed to stdout.  
-To overwrite the file in place:
+To overwrite the file in place (only valid for JSON output):
 
 ```bash
 encjson decrypt -f env.secured.json -w
 ```
 
-If decryption fails, you will see a clear error such as:
+The `-o/--output` flag controls the output format:
 
-```text
-Error: decryption failed: ciphertext may be corrupted, use a wrong key, or come from an incompatible encjson version
-```
+- `-o json` (default) – decrypted JSON (as above)
+- `-o shell` – shell `export` lines, suitable for `eval`
+- `-o dot-env` – `.env` file format (`KEY="value"` per line)
 
-### 4. Export environment variables (`env`)
+Examples:
 
-`encjson env` is intended for `startup.sh` scripts, Docker entrypoints, Kubernetes init containers, etc.  
-It looks for either `env` or `environment` at the top level, decrypts string values and prints `export` lines.
-
-For example:
-
-```json
-{
-  "_public_key": "91c3598085...",
-  "environment": {
-    "DB_PASS": "EncJson[@api=2.0:@box=…]",
-    "KAFKA_PASS": "EncJson[@api=2.0:@box=…]"
-  }
-}
-```
-
-Command:
+#### Decrypt to shell exports
 
 ```bash
-encjson env -f env.secured.json
+encjson decrypt -f env.secured.json -o shell
 ```
 
 Output:
@@ -265,11 +249,76 @@ export DB_PASS="super-secret-password"
 export KAFKA_PASS="another-secret"
 ```
 
-Special characters like `\`, `"`, `` ` `` and `$` are escaped so that the output is safe to `eval`:
+This is safe to use with:
 
 ```bash
-eval "$(encjson env -f env.secured.json)"
+eval "$(encjson decrypt -f env.secured.json -o shell)"
 ```
+
+Special characters like `\`, `"`, `` ` `` and `$` are escaped so that the export lines are shell-safe.
+
+#### Decrypt to .env format
+
+```bash
+encjson decrypt -f env.secured.json -o dot-env > .env
+```
+
+Output (in `.env`):
+
+```bash
+DB_PASS="super-secret-password"
+KAFKA_PASS="another-secret"
+```
+
+Non-string values (numbers, booleans) are written as-is, e.g.:
+
+```bash
+DB_PORT=5432
+FLAG=true
+```
+
+If decryption fails, you will see a clear error such as:
+
+```text
+Error: decryption failed: ciphertext may be corrupted, use a wrong key, or come from an incompatible encjson version
+```
+
+### 4. Export environment variables (`decrypt -o shell` / `env`)
+
+The recommended way to export environment variables from the JSON is:
+
+```bash
+encjson decrypt -f env.secured.json -o shell
+```
+
+or directly:
+
+```bash
+eval "$(encjson decrypt -f env.secured.json -o shell)"
+```
+
+The tool looks for either `env` or `environment` at the top level, decrypts string values and prints one line per key:
+
+```bash
+export DB_PASS="super-secret-password"
+export KAFKA_PASS="another-secret"
+export DB_PORT=5432
+export FLAG=true
+```
+
+The legacy command:
+
+```bash
+encjson env -f env.secured.json
+```
+
+is kept as a shortcut/compatibility wrapper for:
+
+```bash
+encjson decrypt -f env.secured.json -o shell
+```
+
+and behaves the same way.
 
 ### Key lookup
 

@@ -7,20 +7,20 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
 
 use crate::crypto::{SecureBox, generate_key_pair};
 use crate::error::Error;
-use crate::json_utils::{TransformMode, env_exports, transform_json};
+use crate::json_utils::{TransformMode, dotenv_exports, env_exports, transform_json};
 use crate::key_store::{load_private_key, save_private_key};
 
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "encjson-rs",
-    about = "Encrypted JSON helper using Monocypher",
+    name = "encjson",
+    about = "Encrypted JSON helper using X25519 + XChaCha20-Poly1305",
     arg_required_else_help = true
 )]
 struct Cli {
@@ -30,6 +30,16 @@ struct Cli {
 
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum OutputFormat {
+    /// JSON (default) – decrypted JSON to stdout or back to file with -w
+    Json,
+    /// Shell `export` lines – suitable for `eval "$(encjson decrypt -o shell ...)"`,
+    Shell,
+    /// .env format – lines like `VAR="value"`
+    DotEnv,
 }
 
 #[derive(Subcommand, Debug)]
@@ -57,21 +67,31 @@ enum Commands {
     },
 
     /// Decrypt EncJson strings in a JSON file
+    ///
+    /// By default, prints decrypted JSON to stdout. The -o/--output flag can change the format:
+    ///
+    ///   -o json     (default)  -> decrypted JSON
+    ///   -o shell               -> shell export lines
+    ///   -o dot-env             -> .env file format
     Decrypt {
         /// Input file (otherwise reads from stdin)
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Overwrite the input file in place
+        /// Overwrite the input file in place (only valid with -o json)
         #[arg(short = 'w', long)]
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR)
         #[arg(long)]
         keydir: Option<PathBuf>,
+
+        /// Output format (json / shell / dot-env)
+        #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Json)]
+        output: OutputFormat,
     },
 
-    /// Print export lines from the `env`/`environment` section
+    /// (Deprecated) shortcut for `decrypt -o shell`
     Env {
         /// Input file (otherwise reads from stdin)
         #[arg(short, long)]
@@ -88,7 +108,6 @@ fn main() {
 
     // Support `encjson -v`
     if cli.version {
-        // CARGO_PKG_VERSION = verze z Cargo.toml
         println!("encjson {} (rust)", env!("CARGO_PKG_VERSION"));
         return;
     }
@@ -98,13 +117,9 @@ fn main() {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
-    } else {
-        eprintln!("No command specified. Try --help.");
-        std::process::exit(1);
     }
 }
 
-// run teď bere rovnou Commands, ne celý Cli
 fn run(command: Commands) -> Result<()> {
     match command {
         Commands::Init { keydir } => cmd_init(keydir),
@@ -117,8 +132,10 @@ fn run(command: Commands) -> Result<()> {
             file,
             write,
             keydir,
-        } => cmd_decrypt(file, write, keydir),
-        Commands::Env { file, keydir } => cmd_env(file, keydir),
+            output,
+        } => cmd_decrypt(file, write, keydir, output),
+        // `env` pouze přesměrujeme na decrypt -o shell
+        Commands::Env { file, keydir } => cmd_decrypt(file, false, keydir, OutputFormat::Shell),
     }
 }
 
@@ -128,16 +145,16 @@ fn cmd_init(keydir: Option<PathBuf>) -> Result<()> {
 
     println!("Generated key pair (hex):");
 
-    // Na Windows a/nebo pokud je nastaveno ENCJSON_NO_EMOJI -> ASCII fallback
+    // On Windows and/or if ENCJSON_NO_EMOJI is set -> ASCII-only output
     let no_emoji = cfg!(target_os = "windows") || std::env::var("ENCJSON_NO_EMOJI").is_ok();
 
     if no_emoji {
-        println!(" => public:  {}", pub_hex);
-        println!(" => private: {}", priv_hex);
+        println!(" => public:  {pub_hex}");
+        println!(" => private: {priv_hex}");
         println!(" => saved to: {}", path.display());
     } else {
-        println!(" => 🍺 public:  {}", pub_hex);
-        println!(" => 🔑 private: {}", priv_hex);
+        println!(" => 🍺 public:  {pub_hex}");
+        println!(" => 🔑 private: {priv_hex}");
         println!(" => 💾 saved to: {}", path.display());
     }
 
@@ -145,56 +162,61 @@ fn cmd_init(keydir: Option<PathBuf>) -> Result<()> {
 }
 
 fn cmd_encrypt(file: Option<PathBuf>, write: bool, keydir: Option<PathBuf>) -> Result<()> {
-    let mut root = read_json_from(file.as_ref())?;
-    let pub_hex = extract_public_key(&root)?;
+    let mut value = read_json(file.as_ref())?;
 
-    let priv_hex = load_private_key(pub_hex, keydir.as_deref())?;
-    let sb = SecureBox::new_from_hex(&priv_hex, pub_hex)?;
+    let public_key_hex = extract_public_key(&value)?;
+    let private_key_hex = load_private_key(public_key_hex, keydir.as_deref())?;
 
-    transform_json(&mut root, &sb, TransformMode::Encrypt)?;
+    let sb = SecureBox::new_from_hex(&private_key_hex, public_key_hex)?;
+    transform_json(&mut value, &sb, TransformMode::Encrypt)?;
 
-    write_json_to(file.as_ref(), write, &root)?;
-    Ok(())
+    write_json_to(file.as_ref(), write, &value)
 }
 
-fn cmd_decrypt(file: Option<PathBuf>, write: bool, keydir: Option<PathBuf>) -> Result<()> {
-    let mut root = read_json_from(file.as_ref())?;
-    let pub_hex = extract_public_key(&root)?;
-
-    let priv_hex = load_private_key(pub_hex, keydir.as_deref())?;
-    let sb = SecureBox::new_from_hex(&priv_hex, pub_hex)?;
-
-    transform_json(&mut root, &sb, TransformMode::Decrypt)?;
-
-    write_json_to(file.as_ref(), write, &root)?;
-    Ok(())
-}
-
-fn cmd_env(file: Option<PathBuf>, keydir: Option<PathBuf>) -> Result<()> {
-    let mut root = read_json_from(file.as_ref())?;
-    let pub_hex = extract_public_key(&root)?;
-
-    let priv_hex = load_private_key(pub_hex, keydir.as_deref())?;
-    let sb = SecureBox::new_from_hex(&priv_hex, pub_hex)?;
-
-    transform_json(&mut root, &sb, TransformMode::Decrypt)?;
-    if let Some(exports) = env_exports(&root) {
-        print!("{exports}");
+fn cmd_decrypt(
+    file: Option<PathBuf>,
+    write: bool,
+    keydir: Option<PathBuf>,
+    output: OutputFormat,
+) -> Result<()> {
+    // `-w` dává smysl jen pro JSON výstup
+    if write && !matches!(output, OutputFormat::Json) {
+        return Err(Error::InvalidWriteForOutput);
     }
-    Ok(())
+
+    let mut value = read_json(file.as_ref())?;
+
+    let public_key_hex = extract_public_key(&value)?;
+    let private_key_hex = load_private_key(public_key_hex, keydir.as_deref())?;
+
+    let sb = SecureBox::new_from_hex(&private_key_hex, public_key_hex)?;
+    transform_json(&mut value, &sb, TransformMode::Decrypt)?;
+
+    match output {
+        OutputFormat::Json => write_json_to(file.as_ref(), write, &value),
+        OutputFormat::Shell => {
+            let exports = env_exports(&value)?;
+            print!("{exports}");
+            Ok(())
+        }
+        OutputFormat::DotEnv => {
+            let dotenv = dotenv_exports(&value)?;
+            print!("{dotenv}");
+            Ok(())
+        }
+    }
 }
 
-fn read_json_from(path: Option<&PathBuf>) -> Result<Value> {
-    let input = if let Some(p) = path {
-        fs::read_to_string(p)?
-    } else {
-        let mut buf = String::new();
-        io::stdin().read_to_string(&mut buf)?;
-        buf
+fn read_json(file: Option<&PathBuf>) -> Result<Value> {
+    let text = match file {
+        Some(path) => fs::read_to_string(path)?,
+        None => {
+            let mut buf = String::new();
+            io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
     };
-
-    let v: Value = serde_json::from_str(&input)?;
-    Ok(v)
+    Ok(serde_json::from_str(&text)?)
 }
 
 fn write_json_to(path: Option<&PathBuf>, write_in_place: bool, value: &Value) -> Result<()> {
@@ -202,14 +224,17 @@ fn write_json_to(path: Option<&PathBuf>, write_in_place: bool, value: &Value) ->
     if write_in_place {
         if let Some(p) = path {
             fs::write(p, out)?;
-            return Ok(());
+        } else {
+            // `encjson decrypt -w` bez -f
+            return Err(Error::WriteWithoutFile);
         }
+    } else {
+        println!("{out}");
     }
-    println!("{out}");
     Ok(())
 }
 
-/// Vytáhne `_public_key` z JSONu, zkontroluje délku (64 hex znaků).
+/// Extract `_public_key` from JSON and validate length (64 hex chars).
 fn extract_public_key(root: &Value) -> Result<&str> {
     if let Some(pk) = root.get("_public_key").and_then(Value::as_str) {
         if pk.len() == 64 {
