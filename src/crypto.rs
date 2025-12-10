@@ -103,7 +103,7 @@ impl SecureBox {
     /// If the value is already in EncJson[...] format, it is returned unchanged.
     pub fn encrypt_value(&self, val: &str) -> Result<String, CryptoError> {
         if Self::is_encrypted(val) {
-            // already encrypted – behave like the original tool
+            // already encrypted - behave like the original tool
             return Ok(val.to_string());
         }
 
