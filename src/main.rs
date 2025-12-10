@@ -188,11 +188,23 @@ fn cmd_encrypt(
 
     let mut value = read_json(effective_path.as_ref())?;
 
-    let public_key_hex = extract_public_key(&value)?;
-    let private_key_hex = load_private_key(public_key_hex, keydir.as_deref())?;
-
-    let sb = SecureBox::new_from_hex(&private_key_hex, public_key_hex)?;
-    transform_json(&mut value, &sb, TransformMode::Encrypt)?;
+    match extract_public_key(&value) {
+        Ok(public_key_hex) => {
+            // _public_key existuje, normálně šifrujeme
+            let private_key_hex = load_private_key(public_key_hex, keydir.as_deref())?;
+            let sb = SecureBox::new_from_hex(&private_key_hex, public_key_hex)?;
+            transform_json(&mut value, &sb, TransformMode::Encrypt)?;
+        }
+        Err(Error::MissingPublicKey) => {
+            // Bez _public_key nedává crypto smysl -> jen pass-through.
+            // JSON necháme jak je; volitelně upozorníme na stderr.
+            eprintln!("Warning: _public_key not found in JSON, nothing encrypted");
+        }
+        Err(e) => {
+            // jiné chyby (např. špatný formát klíče) jsou pořád fatální
+            return Err(e);
+        }
+    }
 
     write_json_to(effective_path.as_ref(), write, &value)
 }
@@ -209,17 +221,37 @@ fn cmd_decrypt(
         return Err(Error::InvalidWriteForOutput);
     }
 
-    // `file` má přednost (pokud bys někdy zrušil conflicts_with), ale
-    // díky conflicts_with se stejně nemůžou vyskytovat současně.
+    // sjednotíme -f a pozicní argument (např. "-")
     let effective_path = file.or(input);
 
     let mut value = read_json(effective_path.as_ref())?;
 
-    let public_key_hex = extract_public_key(&value)?;
-    let private_key_hex = load_private_key(public_key_hex, keydir.as_deref())?;
+    // Pokusíme se načíst public key.
+    // - Když _public_key chybí -> jen NEBUDEME dělat dešifrování,
+    //   ale pokračujeme a použijeme JSON tak, jak je.
+    // - Když je _public_key špatný -> pořád chyba (to je bug / špatná konfigurace).
+    if let Ok(public_key_hex) = extract_public_key(&value) {
+        // _public_key existuje, takže se pokusíme normálně dešifrovat
+        let private_key_hex = load_private_key(public_key_hex, keydir.as_deref())?;
 
-    let sb = SecureBox::new_from_hex(&private_key_hex, public_key_hex)?;
-    transform_json(&mut value, &sb, TransformMode::Decrypt)?;
+        let sb = SecureBox::new_from_hex(&private_key_hex, public_key_hex)?;
+        transform_json(&mut value, &sb, TransformMode::Decrypt)?;
+    } else {
+        // Pokud extract_public_key skončil chybou MissingPublicKey,
+        // ignorujeme ji a NEděláme žádné crypto.
+        // Ostatní chyby pořád propadnou ven.
+        if let Err(e) = extract_public_key(&value) {
+            match e {
+                Error::MissingPublicKey => {
+                    // Bez _public_key prostě jen "pass-through":
+                    // -o json      -> vytiskne stejný JSON
+                    // -o shell     -> vezme env/environment tak jak je
+                    // -o dot-env   -> dtto
+                }
+                other => return Err(other),
+            }
+        }
+    }
 
     match output {
         OutputFormat::Json => write_json_to(effective_path.as_ref(), write, &value),
