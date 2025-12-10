@@ -214,6 +214,23 @@ Notes:
 - `_public_key` is never touched.
 - If a string is already in `EncJson[@api=…:@box=…]` format, it is left unchanged (idempotent encrypt).
 
+#### Reading from stdin
+
+If you do not specify `-f`, `encjson encrypt` reads JSON from stdin:
+
+```bash
+cat env.secured.json | encjson encrypt
+```
+
+You can also explicitly use `-f -` or a positional `-` to mean “read from stdin” (Unix-style):
+
+```bash
+cat env.secured.json | encjson encrypt -f -
+cat env.secured.json | encjson encrypt -
+```
+
+Both variants read JSON from stdin and print encrypted JSON to stdout.
+
 ### 3. Decrypt a JSON file (`decrypt`)
 
 By default, `decrypt` prints decrypted JSON:
@@ -236,17 +253,18 @@ The `-o/--output` flag controls the output format:
 
 #### Reading from stdin
 
-If you do not specify `-f`, `encjson` reads JSON from stdin:
+If you do not specify `-f`, `encjson decrypt` reads JSON from stdin:
 
 ```bash
 cat env.secured.json | encjson decrypt -o shell
 ```
 
-You can also explicitly use `-f -` to mean “read from stdin” (Unix-style):
+You can also explicitly use `-f -` or a positional `-` to mean “read from stdin” (Unix-style):
 
 ```bash
 cat env.secured.json | encjson decrypt -f - -o shell
-cat env.secured.json | encjson decrypt -f - > decrypted.json
+cat env.secured.json | encjson decrypt -o shell -
+cat env.secured.json | encjson decrypt -
 ```
 
 Examples:
@@ -259,6 +277,7 @@ encjson decrypt -f env.secured.json -o shell
 cat env.secured.json | encjson decrypt -o shell
 # or explicitly stdin:
 cat env.secured.json | encjson decrypt -f - -o shell
+cat env.secured.json | encjson decrypt -o shell -
 ```
 
 Output:
@@ -284,6 +303,8 @@ Special characters like `\`, `"`, `` ` `` and `$` are escaped so that the export
 encjson decrypt -f env.secured.json -o dot-env > .env
 # or:
 cat env.secured.json | encjson decrypt -o dot-env > .env
+# or:
+cat env.secured.json | encjson decrypt -o dot-env - > .env
 ```
 
 Output (in `.env`):
