@@ -20,4 +20,10 @@ pub enum Error {
 
     #[error("Private key not found for public key {0}")]
     PrivateKeyNotFound(String),
+
+    #[error("Cannot use --write/-w without specifying --file/-f")]
+    WriteWithoutFile,
+
+    #[error("--write/-w is only supported for JSON output (use -o json)")]
+    InvalidWriteForOutput,
 }
