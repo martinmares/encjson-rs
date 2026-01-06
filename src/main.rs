@@ -10,9 +10,9 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
-use crate::crypto::{SecureBox, generate_key_pair};
+use crate::crypto::{generate_key_pair, SecureBox};
 use crate::error::Error;
-use crate::json_utils::{TransformMode, dotenv_exports, env_exports, transform_json};
+use crate::json_utils::{dotenv_exports, env_exports, transform_json, TransformMode};
 use crate::key_store::{load_private_key, save_private_key};
 
 type Result<T> = std::result::Result<T, Error>;
@@ -67,7 +67,7 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR)
-        #[arg(long)]
+        #[arg(short = 'k', long)]
         keydir: Option<PathBuf>,
     },
 
@@ -96,7 +96,7 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR)
-        #[arg(long)]
+        #[arg(short = 'k', long)]
         keydir: Option<PathBuf>,
 
         /// Output format (json / shell / dot-env)
@@ -111,7 +111,7 @@ enum Commands {
         file: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR)
-        #[arg(long)]
+        #[arg(short = 'k', long)]
         keydir: Option<PathBuf>,
     },
 }
@@ -313,4 +313,42 @@ fn extract_public_key(root: &Value) -> Result<&str> {
         }
     }
     Err(Error::MissingPublicKey)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_encrypt_accepts_short_keydir() {
+        let cli = Cli::parse_from(["encjson", "encrypt", "-k", "keys-dir"]);
+        match cli.command {
+            Some(Commands::Encrypt { keydir, .. }) => {
+                assert_eq!(keydir, Some(PathBuf::from("keys-dir")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_decrypt_accepts_short_keydir() {
+        let cli = Cli::parse_from(["encjson", "decrypt", "-k", "keys-dir"]);
+        match cli.command {
+            Some(Commands::Decrypt { keydir, .. }) => {
+                assert_eq!(keydir, Some(PathBuf::from("keys-dir")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_env_accepts_short_keydir() {
+        let cli = Cli::parse_from(["encjson", "env", "-k", "keys-dir"]);
+        match cli.command {
+            Some(Commands::Env { keydir, .. }) => {
+                assert_eq!(keydir, Some(PathBuf::from("keys-dir")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }

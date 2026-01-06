@@ -85,3 +85,97 @@ pub fn save_private_key(
     fs::write(&path, private_hex)?;
     Ok(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        dir.push(format!("encjson-{label}-{stamp}-{}", std::process::id()));
+        dir
+    }
+
+    fn set_env_var(key: &str, value: &Path) -> Option<String> {
+        let prev = env::var(key).ok();
+        unsafe {
+            env::set_var(key, value);
+        }
+        prev
+    }
+
+    fn restore_env_var(key: &str, prev: Option<String>) {
+        if let Some(val) = prev {
+            unsafe {
+                env::set_var(key, val);
+            }
+        } else {
+            unsafe {
+                env::remove_var(key);
+            }
+        }
+    }
+
+    #[test]
+    fn load_private_key_prefers_cli_keydir_over_env() {
+        let _guard = env_lock().lock().unwrap();
+        let prev_private = env::var("ENCJSON_PRIVATE_KEY").ok();
+
+        let cli_dir = unique_temp_dir("cli");
+        let env_dir = unique_temp_dir("env");
+        fs::create_dir_all(&cli_dir).unwrap();
+        fs::create_dir_all(&env_dir).unwrap();
+
+        let public_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        fs::write(cli_dir.join(public_hex), "cli-private").unwrap();
+        fs::write(env_dir.join(public_hex), "env-private").unwrap();
+
+        let prev_keydir = set_env_var("ENCJSON_KEYDIR", &env_dir);
+        unsafe {
+            env::remove_var("ENCJSON_PRIVATE_KEY");
+        }
+
+        let loaded = load_private_key(public_hex, Some(cli_dir.as_path())).unwrap();
+        assert_eq!(loaded, "cli-private");
+
+        restore_env_var("ENCJSON_KEYDIR", prev_keydir);
+        restore_env_var("ENCJSON_PRIVATE_KEY", prev_private);
+        let _ = fs::remove_dir_all(&cli_dir);
+        let _ = fs::remove_dir_all(&env_dir);
+    }
+
+    #[test]
+    fn load_private_key_falls_back_to_env_keydir() {
+        let _guard = env_lock().lock().unwrap();
+        let prev_private = env::var("ENCJSON_PRIVATE_KEY").ok();
+
+        let env_dir = unique_temp_dir("env-only");
+        fs::create_dir_all(&env_dir).unwrap();
+
+        let public_hex = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        fs::write(env_dir.join(public_hex), "env-private").unwrap();
+
+        let prev_keydir = set_env_var("ENCJSON_KEYDIR", &env_dir);
+        unsafe {
+            env::remove_var("ENCJSON_PRIVATE_KEY");
+        }
+
+        let loaded = load_private_key(public_hex, None).unwrap();
+        assert_eq!(loaded, "env-private");
+
+        restore_env_var("ENCJSON_KEYDIR", prev_keydir);
+        restore_env_var("ENCJSON_PRIVATE_KEY", prev_private);
+        let _ = fs::remove_dir_all(&env_dir);
+    }
+}

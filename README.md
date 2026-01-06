@@ -145,7 +145,32 @@ target/release/encjson
 
 ```bash
 encjson -v
-# encjson 0.2.0 (rust)
+# encjson 0.4.0 (rust)
+```
+
+### Help / `--help`
+
+Example for `encrypt` (the same `-k/--keydir` option is available for `init`, `decrypt` and `env`):
+
+```bash
+encjson encrypt --help
+```
+
+```text
+Usage: encjson encrypt [OPTIONS]
+
+Options:
+  -f, --file <FILE>      Input file (otherwise reads from stdin)
+  -w, --write            Overwrite the input file in place
+  -k, --keydir <KEYDIR>  Optional key directory (overrides ENCJSON_KEYDIR)
+  -h, --help             Print help
+```
+
+Examples:
+
+```bash
+encjson decrypt -f env.secured.json -k /etc/encjson
+encjson env -f env.secured.json -k /etc/encjson
 ```
 
 ### 1. Generate key pair (`init`)
@@ -171,7 +196,7 @@ By default, the private key is saved to:
 You can override the directory:
 
 ```bash
-encjson init --keydir /etc/encjson
+encjson init -k /etc/encjson
 ```
 
 ### 2. Encrypt a JSON file (`encrypt`)
@@ -193,6 +218,12 @@ You can encrypt it in place:
 
 ```bash
 encjson encrypt -f env.secured.json -w
+```
+
+To override the key directory:
+
+```bash
+encjson encrypt -f env.secured.json -w -k /etc/encjson
 ```
 
 After encryption:
@@ -247,9 +278,17 @@ encjson decrypt -f env.secured.json -w
 
 The `-o/--output` flag controls the output format:
 
+If decryption fails, you will see a clear error such as:
+
 - `-o json` (default) - decrypted JSON (as above)
 - `-o shell` - shell `export` lines, suitable for `eval`
 - `-o dot-env` - `.env` file format (`KEY="value"` per line)
+
+To override the key directory:
+
+```bash
+encjson decrypt -f env.secured.json -w -k /etc/encjson
+```
 
 #### Reading from stdin
 
@@ -278,6 +317,12 @@ cat env.secured.json | encjson decrypt -o shell
 # or explicitly stdin:
 cat env.secured.json | encjson decrypt -f - -o shell
 cat env.secured.json | encjson decrypt -o shell -
+```
+
+To override the key directory:
+
+```bash
+encjson env -f env.secured.json -k /etc/encjson
 ```
 
 Output:
@@ -372,6 +417,7 @@ The tool finds the private key in this order:
 
 1. If `ENCJSON_PRIVATE_KEY` is set and non-empty, it is used directly as a 64-hex string.
 2. Otherwise it looks up a file named `<public_hex>` in:
+   - the `-k/--keydir` CLI argument (if provided), or
    - `$ENCJSON_KEYDIR` (if set), or
    - `~/.encjson`.
 
