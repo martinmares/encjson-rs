@@ -41,6 +41,7 @@ enum Mode {
     AddKey,
     RenameKey,
     Diff,
+    Saved,
     ConfirmExit,
     ConfirmDelete,
 }
@@ -59,6 +60,19 @@ struct App {
     header: String,
     original: HashMap<String, String>,
     diff_scroll: usize,
+    sort_ascending: bool,
+    add_insert_above: bool,
+    order_changed: bool,
+    request_save: bool,
+    save_message: String,
+}
+
+struct SaveContext<'a> {
+    root: &'a mut Value,
+    env_key: String,
+    original_env: &'a mut serde_json::Map<String, Value>,
+    sb: &'a Option<SecureBox>,
+    path: &'a Path,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -86,6 +100,7 @@ pub fn run_edit_ui(path: &Path, keydir: Option<PathBuf>) -> Result<(), Error> {
         .get(env_key)
         .and_then(Value::as_object)
         .ok_or(Error::MissingEnvObject)?;
+    let mut original_env = env_obj.clone();
 
     let sb = match crate::extract_public_key(&root) {
         Ok(public_key_hex) => {
@@ -127,38 +142,30 @@ pub fn run_edit_ui(path: &Path, keydir: Option<PathBuf>) -> Result<(), Error> {
         header: build_header(path)?,
         original,
         diff_scroll: 0,
+        sort_ascending: true,
+        add_insert_above: false,
+        order_changed: false,
+        request_save: false,
+        save_message: String::new(),
     };
 
-    let action = run_ui(&mut app)?;
+    let mut ctx = SaveContext {
+        root: &mut root,
+        env_key: env_key.to_string(),
+        original_env: &mut original_env,
+        sb: &sb,
+        path,
+    };
+    let action = run_ui(&mut app, &mut ctx)?;
 
-    let has_changes = app.entries.iter().any(|e| e.dirty) || !app.deleted_keys.is_empty();
-    if action == ExitAction::Save && has_changes {
-        let mut updated_env = env_obj.clone();
-        for key in app.deleted_keys.iter() {
-            updated_env.remove(key);
-        }
-        for entry in app.entries.iter().filter(|e| e.dirty) {
-            let parsed = parse_json_or_string(&entry.display);
-            let updated = match parsed {
-                Value::String(s) => match sb.as_ref() {
-                    Some(sb) => Value::String(sb.encrypt_value(&s)?),
-                    None => Value::String(s),
-                },
-                other => other,
-            };
-            updated_env.insert(entry.key.clone(), updated);
-        }
-        if let Some(obj) = root.as_object_mut() {
-            obj.insert(env_key.to_string(), Value::Object(updated_env));
-        }
-        let out = serde_json::to_string_pretty(&root)?;
-        fs::write(path, out)?;
+    if matches!(action, ExitAction::Save) {
+        apply_save(&mut app, &mut ctx)?;
     }
 
     Ok(())
 }
 
-fn run_ui(app: &mut App) -> Result<ExitAction, Error> {
+fn run_ui(app: &mut App, ctx: &mut SaveContext<'_>) -> Result<ExitAction, Error> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -166,7 +173,7 @@ fn run_ui(app: &mut App) -> Result<ExitAction, Error> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = ui_loop(&mut terminal, app);
+    let result = ui_loop(&mut terminal, app, ctx);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -178,6 +185,7 @@ fn run_ui(app: &mut App) -> Result<ExitAction, Error> {
 fn ui_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
+    ctx: &mut SaveContext<'_>,
 ) -> Result<ExitAction, Error> {
     loop {
         terminal.draw(|f| render_ui(f, app))?;
@@ -190,9 +198,20 @@ fn ui_loop(
                 Mode::AddKey => handle_add_key_mode(app, key),
                 Mode::RenameKey => handle_rename_mode(app, key),
                 Mode::Diff => handle_diff_mode(app, key),
+                Mode::Saved => handle_saved_mode(app, key),
                 Mode::ConfirmExit => handle_confirm_mode(app, key),
                 Mode::ConfirmDelete => handle_delete_mode(app, key),
             };
+            if app.request_save {
+                app.request_save = false;
+                if has_changes(app) {
+                    apply_save(app, ctx)?;
+                    app.save_message = "Saved".to_string();
+                } else {
+                    app.save_message = "No changes".to_string();
+                }
+                app.mode = Mode::Saved;
+            }
             if let Some(action) = exit {
                 return Ok(action);
             }
@@ -208,6 +227,12 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
         app.selected = indices.len() - 1;
     }
     match key.code {
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            move_selected(app, true);
+        }
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            move_selected(app, false);
+        }
         KeyCode::Up => {
             if app.selected > 0 {
                 app.selected -= 1;
@@ -231,14 +256,22 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
             app.cursor = app.input.len();
             app.mode = Mode::Filter;
         }
-        KeyCode::Char('+') => {
+        KeyCode::Char('a') | KeyCode::Char('A') => {
             app.input.clear();
             app.cursor = 0;
             app.mode = Mode::AddKey;
+            app.add_insert_above =
+                key.modifiers.contains(KeyModifiers::SHIFT) || matches!(key.code, KeyCode::Char('A'));
+        }
+        KeyCode::Char('t') => {
+            sort_entries(app);
         }
         KeyCode::Char('v') => {
             app.diff_scroll = 0;
             app.mode = Mode::Diff;
+        }
+        KeyCode::Char('s') => {
+            app.request_save = true;
         }
         KeyCode::Char('r') => {
             if let Some(entry_index) = indices.get(app.selected).copied() {
@@ -254,11 +287,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
                 app.mode = Mode::ConfirmDelete;
             }
         }
-        KeyCode::Char('s') => {
-            return Some(ExitAction::Save);
-        }
         KeyCode::Char('q') | KeyCode::Esc => {
-            if app.entries.iter().any(|e| e.dirty) || !app.deleted_keys.is_empty() {
+            if app.entries.iter().any(|e| e.dirty)
+                || !app.deleted_keys.is_empty()
+                || app.order_changed
+            {
                 app.mode = Mode::ConfirmExit;
             } else {
                 return Some(ExitAction::Discard);
@@ -317,6 +350,16 @@ fn handle_diff_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
     None
 }
 
+fn handle_saved_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
+    match key.code {
+        KeyCode::Enter | KeyCode::Esc => {
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    None
+}
+
 fn handle_filter_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
     match key.code {
         KeyCode::Enter => {
@@ -351,12 +394,22 @@ fn handle_add_key_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
                 if exists {
                     return None;
                 }
-                app.entries.push(Entry {
-                    key: candidate,
-                    display: String::new(),
-                    dirty: true,
-                });
-                let entry_index = app.entries.len() - 1;
+                let indices = filtered_indices(app);
+                let insert_at = if indices.is_empty() {
+                    app.entries.len()
+                } else {
+                    let base = indices[app.selected.min(indices.len() - 1)];
+                    if app.add_insert_above { base } else { base + 1 }
+                };
+                app.entries.insert(
+                    insert_at,
+                    Entry {
+                        key: candidate,
+                        display: String::new(),
+                        dirty: true,
+                    },
+                );
+                let entry_index = insert_at;
                 app.filter = None;
                 app.selected = entry_index;
                 app.input = app.entries[entry_index].display.clone();
@@ -534,13 +587,14 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
 
     let help = match app.mode {
         Mode::Normal => {
-            "Up/Down select | e edit | / filter | + add | r rename | d delete | v diff | s save | q quit"
+            "Up/Down select | Shift+Up/Down move | e edit | / filter | a add | r rename | d delete | t sort | v diff | s save | q quit"
         }
         Mode::Edit => "Enter save field | Esc cancel | Left/Right move",
         Mode::Filter => "Filter key/value (case-insensitive) | Enter apply | Esc cancel",
         Mode::AddKey => "New key | Enter confirm | Esc cancel",
         Mode::RenameKey => "Rename key | Enter confirm | Esc cancel",
         Mode::Diff => "Diff view | Up/Down scroll | q/Esc close",
+        Mode::Saved => "Saved | Enter/Esc to continue",
         Mode::ConfirmExit => "Save changes? y/n/c",
         Mode::ConfirmDelete => "Delete key? y/n/c",
     };
@@ -563,20 +617,19 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
     f.render_widget(help_line, chunks[3]);
 
     if app.mode == Mode::ConfirmExit {
-        let area = centered_rect(35, 12, size);
+        let area = centered_rect_fixed(48, 3, size);
         f.render_widget(Clear, area);
         let block = Block::default()
-            .title("Save changes?")
+            .title(" Save changes? ")
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Yellow));
         let text = Line::from(vec![
-            Span::raw("Press "),
             Span::styled("y", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" to save, "),
+            Span::raw(" save  "),
             Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" to discard, "),
+            Span::raw(" discard  "),
             Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" to cancel."),
+            Span::raw(" cancel"),
         ]);
         let paragraph = Paragraph::new(text)
             .block(block)
@@ -588,7 +641,7 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
         let area = centered_rect(35, 12, size);
         f.render_widget(Clear, area);
         let block = Block::default()
-            .title("Delete key?")
+            .title(" Delete key? ")
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Red));
         let text = Line::from(vec![
@@ -608,11 +661,11 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
         let area = centered_rect(45, 12, size);
         f.render_widget(Clear, area);
         let title = if app.mode == Mode::Filter {
-            "Filter keys"
+            " Filter keys "
         } else if app.mode == Mode::AddKey {
-            "New key"
+            " New key "
         } else {
-            "Rename key"
+            " Rename key "
         };
         let block = Block::default()
             .title(title)
@@ -640,9 +693,9 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
         let area = centered_rect(70, 35, size);
         f.render_widget(Clear, area);
         let title = if let Some(entry) = selected_entry(app) {
-            format!("Edit: {}", entry.key)
+            format!(" Edit: {} ", entry.key)
         } else {
-            "Edit value".to_string()
+            " Edit value ".to_string()
         };
         let block = Block::default()
             .title(title)
@@ -673,7 +726,7 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
         f.set_cursor_position((cursor_x, cursor_y));
 
         let preview_block = Block::default()
-            .title("Bytes (hex)")
+            .title(" Bytes (hex) ")
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Cyan));
         let preview_area = edit_layout[1];
@@ -698,7 +751,7 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
         let area = centered_rect(80, 70, size);
         f.render_widget(Clear, area);
         let block = Block::default()
-            .title("Diff (unsaved)")
+            .title(" Diff (unsaved) ")
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Cyan));
         let inner = block.inner(area);
@@ -710,6 +763,19 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
             .scroll((scroll_y as u16, 0));
         f.render_widget(paragraph, area);
         render_value_scrollbar(f, area, &block, scroll_y, lines.len());
+    }
+
+    if app.mode == Mode::Saved {
+        let area = centered_rect_fixed(28, 3, size);
+        f.render_widget(Clear, area);
+        let block = Block::default()
+            .title(" Saved ")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Green));
+        let paragraph = Paragraph::new(app.save_message.as_str())
+            .block(block)
+            .alignment(Alignment::Center);
+        f.render_widget(paragraph, area);
     }
 }
 
@@ -760,6 +826,14 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
+    let width = width.min(r.width);
+    let height = height.min(r.height);
+    let x = r.x + (r.width.saturating_sub(width)) / 2;
+    let y = r.y + (r.height.saturating_sub(height)) / 2;
+    Rect { x, y, width, height }
 }
 
 fn parse_json_or_string(input: &str) -> Value {
@@ -1011,6 +1085,45 @@ fn selected_entry(app: &App) -> Option<&Entry> {
     app.entries.get(idx)
 }
 
+fn move_selected(app: &mut App, up: bool) {
+    let indices = filtered_indices(app);
+    if indices.is_empty() {
+        return;
+    }
+    let selected = app.selected.min(indices.len() - 1);
+    let idx = indices[selected];
+    if up {
+        if idx == 0 {
+            return;
+        }
+        app.entries.swap(idx - 1, idx);
+        app.order_changed = true;
+        if selected > 0 {
+            app.selected -= 1;
+        }
+    } else {
+        if idx + 1 >= app.entries.len() {
+            return;
+        }
+        app.entries.swap(idx, idx + 1);
+        app.order_changed = true;
+        if selected + 1 < indices.len() {
+            app.selected += 1;
+        }
+    }
+}
+
+fn sort_entries(app: &mut App) {
+    if app.sort_ascending {
+        app.entries.sort_by(|a, b| a.key.cmp(&b.key));
+    } else {
+        app.entries.sort_by(|a, b| b.key.cmp(&a.key));
+    }
+    app.order_changed = true;
+    app.sort_ascending = !app.sort_ascending;
+    app.selected = 0;
+}
+
 fn render_scrollbar(
     f: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -1114,6 +1227,49 @@ fn diff_line(prefix: char, key: &str, value: &str, color: Color) -> Line<'static
     let value = value.replace('\n', "\\n");
     let text = format!("{prefix} {key}={value}");
     Line::from(Span::styled(text, Style::default().fg(color)))
+}
+
+fn has_changes(app: &App) -> bool {
+    app.entries.iter().any(|e| e.dirty) || !app.deleted_keys.is_empty() || app.order_changed
+}
+
+fn apply_save(app: &mut App, ctx: &mut SaveContext<'_>) -> Result<(), Error> {
+    let mut updated_env = serde_json::Map::new();
+    for entry in &app.entries {
+        if app.deleted_keys.contains(&entry.key) {
+            continue;
+        }
+        let value = if entry.dirty {
+            let parsed = parse_json_or_string(&entry.display);
+            match parsed {
+                Value::String(s) => match ctx.sb.as_ref() {
+                    Some(sb) => Value::String(sb.encrypt_value(&s)?),
+                    None => Value::String(s),
+                },
+                other => other,
+            }
+        } else if let Some(original) = ctx.original_env.get(&entry.key) {
+            original.clone()
+        } else {
+            Value::String(entry.display.clone())
+        };
+        updated_env.insert(entry.key.clone(), value);
+    }
+    if let Some(obj) = ctx.root.as_object_mut() {
+        obj.insert(ctx.env_key.clone(), Value::Object(updated_env.clone()));
+    }
+    let out = serde_json::to_string_pretty(ctx.root)?;
+    fs::write(ctx.path, out)?;
+
+    *ctx.original_env = updated_env;
+    app.original.clear();
+    for entry in &mut app.entries {
+        entry.dirty = false;
+        app.original.insert(entry.key.clone(), entry.display.clone());
+    }
+    app.deleted_keys.clear();
+    app.order_changed = false;
+    Ok(())
 }
 
 fn visible_value_line(value: &str) -> Line<'static> {
