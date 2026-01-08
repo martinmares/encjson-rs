@@ -1,5 +1,7 @@
 use crate::crypto::{CryptoError, SecureBox};
 use serde_json::Value;
+use std::collections::HashMap;
+use tracing::debug;
 
 #[derive(Copy, Clone, Debug)]
 pub enum TransformMode {
@@ -69,6 +71,13 @@ pub fn env_exports(root: &Value) -> Result<String, CryptoError> {
 /// Export environment variables as .env format (no `export` prefix).
 /// Export environment variables as .env format (no "export" and no quotes).
 pub fn dotenv_exports(root: &Value) -> Result<String, CryptoError> {
+    dotenv_exports_with_lookup(root, |key| std::env::var(key).ok())
+}
+
+fn dotenv_exports_with_lookup<F>(root: &Value, env_lookup: F) -> Result<String, CryptoError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let obj = root
         .as_object()
         .ok_or_else(|| CryptoError::Invalid("root JSON must be an object".to_string()))?;
@@ -82,14 +91,18 @@ pub fn dotenv_exports(root: &Value) -> Result<String, CryptoError> {
         })?;
 
     let mut out = String::new();
+    let mut cache = HashMap::new();
+    let mut stack = Vec::new();
 
     for (key, val) in env_obj {
         match val {
             // pro strings: KEY=value (bez uvozovek, bez escapování)
             Value::String(s) => {
+                let resolved =
+                    render_env_string(s, key, env_obj, &mut cache, &mut stack, &env_lookup)?;
                 out.push_str(key);
                 out.push('=');
-                out.push_str(s);
+                out.push_str(&resolved);
                 out.push('\n');
             }
             // pro non-strings: KEY=<json>
@@ -106,6 +119,17 @@ pub fn dotenv_exports(root: &Value) -> Result<String, CryptoError> {
 }
 
 fn env_exports_internal(root: &Value, with_export: bool) -> Result<String, CryptoError> {
+    env_exports_internal_with_lookup(root, with_export, |key| std::env::var(key).ok())
+}
+
+fn env_exports_internal_with_lookup<F>(
+    root: &Value,
+    with_export: bool,
+    env_lookup: F,
+) -> Result<String, CryptoError>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let obj = root
         .as_object()
         .ok_or_else(|| CryptoError::Invalid("root JSON must be an object".to_string()))?;
@@ -119,11 +143,15 @@ fn env_exports_internal(root: &Value, with_export: bool) -> Result<String, Crypt
         })?;
 
     let mut out = String::new();
+    let mut cache = HashMap::new();
+    let mut stack = Vec::new();
 
     for (key, val) in env_obj {
         match val {
             Value::String(s) => {
-                let escaped = escape_env_value(s);
+                let resolved =
+                    render_env_string(s, key, env_obj, &mut cache, &mut stack, &env_lookup)?;
+                let escaped = escape_env_value(&resolved);
                 if with_export {
                     // export KEY="escaped"
                     out.push_str("export ");
@@ -153,6 +181,129 @@ fn env_exports_internal(root: &Value, with_export: bool) -> Result<String, Crypt
     }
 
     Ok(out)
+}
+
+fn render_env_string(
+    input: &str,
+    current_key: &str,
+    env_obj: &serde_json::Map<String, Value>,
+    cache: &mut HashMap<String, String>,
+    stack: &mut Vec<String>,
+    env_lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<String, CryptoError> {
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        if input[i..].starts_with("{env:") {
+            let start = i + "{env:".len();
+            if let Some(end_rel) = input[start..].find('}') {
+                let end = start + end_rel;
+                let key = &input[start..end];
+                let resolved = resolve_env_key(key, env_obj, cache, stack, env_lookup)?;
+                if let Some(value) = &resolved.value {
+                    out.push_str(value);
+                } else {
+                    out.push_str(&input[i..=end]);
+                }
+                debug!(
+                    key = current_key,
+                    placeholder = key,
+                    source = resolved.source.as_str(),
+                    value = resolved.value.as_deref(),
+                    "encjson: expand"
+                );
+                i = end + 1;
+                continue;
+            }
+        }
+        let ch = input[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    Ok(out)
+}
+
+fn resolve_env_key(
+    key: &str,
+    env_obj: &serde_json::Map<String, Value>,
+    cache: &mut HashMap<String, String>,
+    stack: &mut Vec<String>,
+    env_lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<ResolvedValue, CryptoError> {
+    if let Some(cached) = cache.get(key) {
+        return Ok(ResolvedValue::from_json(cached.clone()));
+    }
+
+    if stack.iter().any(|k| k == key) {
+        let mut path = stack.join(" -> ");
+        if !path.is_empty() {
+            path.push_str(" -> ");
+        }
+        path.push_str(key);
+        return Err(CryptoError::Invalid(format!(
+            "environment reference cycle detected: {path}"
+        )));
+    }
+
+    if let Some(val) = env_obj.get(key) {
+        stack.push(key.to_string());
+        let resolved = match val {
+            Value::String(s) => render_env_string(s, key, env_obj, cache, stack, env_lookup)?,
+            other => other.to_string(),
+        };
+        stack.pop();
+        cache.insert(key.to_string(), resolved.clone());
+        return Ok(ResolvedValue::from_json(resolved));
+    }
+
+    match env_lookup(key) {
+        Some(v) => Ok(ResolvedValue::from_env(v)),
+        None => Ok(ResolvedValue::missing()),
+    }
+}
+
+enum ResolvedSource {
+    Json,
+    OsEnv,
+    Missing,
+}
+
+struct ResolvedValue {
+    value: Option<String>,
+    source: ResolvedSource,
+}
+
+impl ResolvedValue {
+    fn from_json(value: String) -> Self {
+        Self {
+            value: Some(value),
+            source: ResolvedSource::Json,
+        }
+    }
+
+    fn from_env(value: String) -> Self {
+        Self {
+            value: Some(value),
+            source: ResolvedSource::OsEnv,
+        }
+    }
+
+    fn missing() -> Self {
+        Self {
+            value: None,
+            source: ResolvedSource::Missing,
+        }
+    }
+}
+
+impl ResolvedSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ResolvedSource::Json => "json",
+            ResolvedSource::OsEnv => "env",
+            ResolvedSource::Missing => "missing",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -285,6 +436,59 @@ mod tests {
         assert_eq!(
             exports,
             "export P=\"\\`weird \\\"\\$VALUE\\\" path\\\\with\\\\stuff\\`\"\n"
+        );
+    }
+
+    #[test]
+    fn env_exports_resolves_references_from_json() {
+        let v = json!({
+            "environment": {
+                "DB_USERNAME": "other",
+                "DB_HOST": "localhost",
+                "DB_NAME": "otherdb",
+                "DB_CONNECTION_STRING": "postgresql://{env:DB_USERNAME}@{env:DB_HOST}/{env:DB_NAME}"
+            }
+        });
+
+        let exports = env_exports(&v).unwrap();
+        assert!(
+            exports
+                .contains("export DB_CONNECTION_STRING=\"postgresql://other@localhost/otherdb\"")
+        );
+    }
+
+    #[test]
+    fn env_exports_resolves_references_from_os_env() {
+        let v = json!({
+            "environment": {
+                "DB_URL": "postgresql://{env:ENCJSON_TEST_HOST}/db"
+            }
+        });
+
+        let exports = env_exports_internal_with_lookup(&v, true, |key| {
+            if key == "ENCJSON_TEST_HOST" {
+                Some("example.local".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert!(exports.contains("export DB_URL=\"postgresql://example.local/db\""));
+    }
+
+    #[test]
+    fn env_exports_detects_reference_cycles() {
+        let v = json!({
+            "environment": {
+                "A": "{env:B}",
+                "B": "{env:A}"
+            }
+        });
+
+        let err = env_exports(&v).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("environment reference cycle detected")
         );
     }
 }
