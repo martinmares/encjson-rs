@@ -101,6 +101,7 @@ Properties:
 - Generate random public/private key pairs (`encjson init`)
 - Encrypt JSON files in place or to stdout (`encjson encrypt`)
 - Decrypt JSON files with multiple output formats (`encjson decrypt -o json|shell|dot-env`)
+- Edit environment values in a terminal UI (`encjson edit --ui`)
 - Export environment variables from JSON as shell exports or .env format (`encjson decrypt -o shell` / `encjson decrypt -o dot-env`)
 - Uses `ENCJSON_KEYDIR` and `ENCJSON_PRIVATE_KEY` in a simple, predictable way
 - Pure Rust implementation, no C libraries or `libclang` required
@@ -145,7 +146,7 @@ target/release/encjson
 
 ```bash
 encjson -v
-# encjson 0.4.0 (rust)
+# encjson 0.6.0 (rust)
 ```
 
 ### Help / `--help`
@@ -410,6 +411,46 @@ encjson decrypt -f env.secured.json -o shell
 ```
 
 and behaves the same way.
+
+### 5. Edit environment variables (`edit`)
+
+`encjson edit` opens a terminal UI for editing the `environment` / `env` object directly.
+
+```bash
+encjson edit -f env.secured.json
+```
+
+Notes:
+
+- Values are shown decrypted so you can edit them easily.
+- Only edited values are re-encrypted; untouched values keep their original ciphertext.
+- On exit you will be prompted to `Save` or `Discard` changes.
+- Works even if `_public_key` is missing (treated as plain JSON).
+- `Values` list shows `<empty>` or `<spaces:N>` for empty/whitespace-only values.
+- Edit modal includes a hex preview so trailing spaces and non-printable bytes are visible.
+- Keys: `Up/Down` select, `e` edit, `/` filter (key/value), `+` add, `r` rename, `d` delete, `v` diff, `s` save, `q` quit.
+- Diff view: `v` opens a colored diff of added/removed/changed values.
+
+Screen-style examples:
+
+```text
+Editing env.secured.json in /path/to/project | modified 2025-02-14 10:32:11 +01:00
+┌ Keys ────────────────────────────────────┐┌ Values ─────────────────────────────────┐
+│ > SPRING_DATASOURCE_USERNAME             ││ > tsm_admin                             │
+│   SPRING_DATASOURCE_PASSWORD             ││   <empty>                               │
+│   KAFKA_SASL_JAAS_CONFIG                 ││   org.apache.kafka...                   │
+└──────────────────────────────────────────┘└─────────────────────────────────────────┘
+key: SPRING_DATASOURCE_USERNAME
+Up/Down select | e edit | / filter | + add | r rename | d delete | v diff | s save | q quit
+```
+
+```text
+┌ Diff (unsaved) ───────────────────────────────────────────────────────────────┐
+│ - SPRING_DATASOURCE_PASSWORD=old-secret                                       │
+│ + SPRING_DATASOURCE_PASSWORD=new-secret                                       │
+│ + NEW_FLAG=true                                                               │
+└-──────────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Key lookup
 

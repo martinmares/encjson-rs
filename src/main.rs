@@ -2,6 +2,7 @@ mod crypto;
 mod error;
 mod json_utils;
 mod key_store;
+mod tui_edit;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
@@ -10,10 +11,11 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
-use crate::crypto::{generate_key_pair, SecureBox};
+use crate::crypto::{SecureBox, generate_key_pair};
 use crate::error::Error;
-use crate::json_utils::{dotenv_exports, env_exports, transform_json, TransformMode};
+use crate::json_utils::{TransformMode, dotenv_exports, env_exports, transform_json};
 use crate::key_store::{load_private_key, save_private_key};
+use crate::tui_edit::run_edit_ui;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -114,6 +116,29 @@ enum Commands {
         #[arg(short = 'k', long)]
         keydir: Option<PathBuf>,
     },
+
+    /// Edit key/value pairs in `environment` or `env` using a terminal UI
+    Edit {
+        /// Input file (required for UI editing)
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+
+        /// Optional positional input (kept for symmetry; not valid for UI)
+        #[arg(value_name = "INPUT", conflicts_with = "file")]
+        input: Option<PathBuf>,
+
+        /// Optional key directory (overrides ENCJSON_KEYDIR)
+        #[arg(short = 'k', long)]
+        keydir: Option<PathBuf>,
+
+        /// Launch terminal UI (default)
+        #[arg(long)]
+        ui: bool,
+
+        /// (Reserved) launch web UI
+        #[arg(long, conflicts_with = "ui")]
+        web: bool,
+    },
 }
 
 fn main() {
@@ -152,6 +177,13 @@ fn run(command: Commands) -> Result<()> {
         Commands::Env { file, keydir } => {
             cmd_decrypt(file, None, false, keydir, OutputFormat::Shell)
         }
+        Commands::Edit {
+            file,
+            input,
+            keydir,
+            ui,
+            web,
+        } => cmd_edit(file, input, keydir, ui, web),
     }
 }
 
@@ -268,6 +300,26 @@ fn cmd_decrypt(
     }
 }
 
+fn cmd_edit(
+    file: Option<PathBuf>,
+    input: Option<PathBuf>,
+    keydir: Option<PathBuf>,
+    _ui: bool,
+    web: bool,
+) -> Result<()> {
+    let effective_path = file.or(input);
+    let Some(path) = effective_path else {
+        return Err(Error::EditRequiresFile);
+    };
+    if path.as_os_str() == OsStr::new("-") {
+        return Err(Error::EditRequiresFile);
+    }
+    if web {
+        return Err(Error::UnsupportedEditMode);
+    }
+    run_edit_ui(&path, keydir)
+}
+
 fn read_json(file: Option<&PathBuf>) -> Result<Value> {
     let text = match file {
         // explicitní stdin: -f - nebo pozicní "-"
@@ -304,7 +356,7 @@ fn write_json_to(path: Option<&PathBuf>, write_in_place: bool, value: &Value) ->
 }
 
 /// Extract `_public_key` from JSON and validate length (64 hex chars).
-fn extract_public_key(root: &Value) -> Result<&str> {
+pub(crate) fn extract_public_key(root: &Value) -> Result<&str> {
     if let Some(pk) = root.get("_public_key").and_then(Value::as_str) {
         if pk.len() == 64 {
             return Ok(pk);
@@ -346,6 +398,19 @@ mod tests {
         let cli = Cli::parse_from(["encjson", "env", "-k", "keys-dir"]);
         match cli.command {
             Some(Commands::Env { keydir, .. }) => {
+                assert_eq!(keydir, Some(PathBuf::from("keys-dir")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_edit_accepts_short_keydir() {
+        let cli = Cli::parse_from([
+            "encjson", "edit", "-k", "keys-dir", "--ui", "-f", "env.json",
+        ]);
+        match cli.command {
+            Some(Commands::Edit { keydir, .. }) => {
                 assert_eq!(keydir, Some(PathBuf::from("keys-dir")));
             }
             other => panic!("unexpected command: {other:?}"),
