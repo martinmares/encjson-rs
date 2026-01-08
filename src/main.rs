@@ -10,6 +10,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::sync::Once;
 
 use crate::crypto::{SecureBox, generate_key_pair};
 use crate::error::Error;
@@ -104,6 +105,10 @@ enum Commands {
         /// Output format (json / shell / dot-env)
         #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Json)]
         output: OutputFormat,
+
+        /// Print expansion trace to stderr (use RUST_LOG=debug to see it)
+        #[arg(long)]
+        debug: bool,
     },
 
     /// (Deprecated) shortcut for `decrypt -o shell`
@@ -115,6 +120,10 @@ enum Commands {
         /// Optional key directory (overrides ENCJSON_KEYDIR)
         #[arg(short = 'k', long)]
         keydir: Option<PathBuf>,
+
+        /// Print expansion trace to stderr (use RUST_LOG=debug to see it)
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Edit key/value pairs in `environment` or `env` using a terminal UI
@@ -173,10 +182,13 @@ fn run(command: Commands) -> Result<()> {
             write,
             keydir,
             output,
-        } => cmd_decrypt(file, input, write, keydir, output),
-        Commands::Env { file, keydir } => {
-            cmd_decrypt(file, None, false, keydir, OutputFormat::Shell)
-        }
+            debug,
+        } => cmd_decrypt(file, input, write, keydir, output, debug),
+        Commands::Env {
+            file,
+            keydir,
+            debug,
+        } => cmd_decrypt(file, None, false, keydir, OutputFormat::Shell, debug),
         Commands::Edit {
             file,
             input,
@@ -247,7 +259,12 @@ fn cmd_decrypt(
     write: bool,
     keydir: Option<PathBuf>,
     output: OutputFormat,
+    debug: bool,
 ) -> Result<()> {
+    if debug {
+        init_tracing();
+    }
+
     // `-w` dává smysl jen pro JSON výstup
     if write && !matches!(output, OutputFormat::Json) {
         return Err(Error::InvalidWriteForOutput);
@@ -298,6 +315,20 @@ fn cmd_decrypt(
             Ok(())
         }
     }
+}
+
+fn init_tracing() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .with_target(false)
+            .with_level(true)
+            .init();
+    });
 }
 
 fn cmd_edit(

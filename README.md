@@ -389,7 +389,7 @@ or directly:
 eval "$(encjson decrypt -f env.secured.json -o shell)"
 ```
 
-The tool looks for either `env` or `environment` at the top level, decrypts string values and prints one line per key:
+The tool looks for either `env` or `environment` at the top level, decrypts string values, resolves `{env:VAR}` placeholders, and prints one line per key:
 
 ```bash
 export DB_PASS="super-secret-password"
@@ -397,6 +397,18 @@ export KAFKA_PASS="another-secret"
 export DB_PORT=5432
 export FLAG=true
 ```
+
+Placeholders are resolved in this order:
+1. If `VAR` exists in the same JSON `env`/`environment` object, use that value.
+2. Otherwise fall back to the OS environment.
+
+If you want to inspect how `{env:...}` expansions were resolved, enable debug tracing:
+
+```bash
+RUST_LOG=debug encjson decrypt -f env.secured.json -o shell --debug
+```
+
+Logs are written to stderr so they won't break `eval`.
 
 The legacy command:
 
