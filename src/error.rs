@@ -21,6 +21,15 @@ pub enum Error {
     #[error("Private key not found for public key {0}")]
     PrivateKeyNotFound(String),
 
+    #[error("JSON must contain `environment` or `env` object")]
+    MissingEnvObject,
+
+    #[error("edit requires --file/-f (stdin is not supported)")]
+    EditRequiresFile,
+
+    #[error("Web UI is not implemented yet (use --ui)")]
+    UnsupportedEditMode,
+
     #[error("Cannot use --write/-w without specifying --file/-f")]
     WriteWithoutFile,
 
