@@ -101,7 +101,7 @@ Properties:
 - Generate random public/private key pairs (`encjson init`)
 - Encrypt JSON files in place or to stdout (`encjson encrypt`)
 - Decrypt JSON files with multiple output formats (`encjson decrypt -o json|shell|dot-env`)
-- Edit environment values in a terminal UI (`encjson edit --ui`)
+- Edit environment values in a terminal UI (`encjson edit`)
 - Export environment variables from JSON as shell exports or .env format (`encjson decrypt -o shell` / `encjson decrypt -o dot-env`)
 - Uses `ENCJSON_KEYDIR` and `ENCJSON_PRIVATE_KEY` in a simple, predictable way
 - Pure Rust implementation, no C libraries or `libclang` required
@@ -440,7 +440,8 @@ Notes:
 - Works even if `_public_key` is missing (treated as plain JSON).
 - `Values` list shows `<empty>` or `<spaces:N>` for empty/whitespace-only values.
 - Edit modal includes a hex preview so trailing spaces and non-printable bytes are visible.
-- Keys: `Up/Down` select, `e` edit, `/` filter (key/value), `+` add, `r` rename, `d` delete, `v` diff, `s` save, `q` quit.
+- Keys: `Up/Down` select, `Shift+Up/Down` move, `e` edit, `/` filter (key/value), `a` add (`A` adds above cursor), `r` rename, `d` delete, `t` sort, `v` diff, `s` save, `q` quit.
+- `s` saves without exiting (shows a small confirmation dialog).
 - Diff view: `v` opens a colored diff of added/removed/changed values.
 
 Screen-style examples:
@@ -453,7 +454,7 @@ Editing env.secured.json in /path/to/project | modified 2025-02-14 10:32:11 +01:
 │   KAFKA_SASL_JAAS_CONFIG                 ││   org.apache.kafka...                   │
 └──────────────────────────────────────────┘└─────────────────────────────────────────┘
 key: SPRING_DATASOURCE_USERNAME
-Up/Down select | e edit | / filter | + add | r rename | d delete | v diff | s save | q quit
+Up/Down select | Shift+Up/Down move | e edit | / filter | a add | r rename | d delete | t sort | v diff | s save | q quit
 ```
 
 ```text
