@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -173,6 +173,7 @@ fn run_ui(app: &mut App, ctx: &mut SaveContext<'_>) -> Result<ExitAction, Error>
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    drain_pending_events()?;
     let result = ui_loop(&mut terminal, app, ctx);
 
     disable_raw_mode()?;
@@ -191,6 +192,9 @@ fn ui_loop(
         terminal.draw(|f| render_ui(f, app))?;
 
         if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             let exit = match app.mode {
                 Mode::Normal => handle_normal_mode(app, key),
                 Mode::Edit => handle_edit_mode(app, key),
@@ -217,6 +221,13 @@ fn ui_loop(
             }
         }
     }
+}
+
+fn drain_pending_events() -> Result<(), Error> {
+    while event::poll(std::time::Duration::from_millis(0))? {
+        let _ = event::read()?;
+    }
+    Ok(())
 }
 
 fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
