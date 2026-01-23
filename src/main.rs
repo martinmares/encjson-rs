@@ -49,7 +49,7 @@ enum OutputFormat {
 enum Commands {
     /// Generate a new public/private key pair
     Init {
-        /// Optional key directory (overrides ENCJSON_KEYDIR, default is ~/.encjson)
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
         #[arg(short, long)]
         keydir: Option<PathBuf>,
     },
@@ -69,7 +69,7 @@ enum Commands {
         #[arg(short = 'w', long)]
         write: bool,
 
-        /// Optional key directory (overrides ENCJSON_KEYDIR)
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
         #[arg(short = 'k', long)]
         keydir: Option<PathBuf>,
     },
@@ -98,7 +98,7 @@ enum Commands {
         #[arg(short = 'w', long)]
         write: bool,
 
-        /// Optional key directory (overrides ENCJSON_KEYDIR)
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
         #[arg(short = 'k', long)]
         keydir: Option<PathBuf>,
 
@@ -117,7 +117,7 @@ enum Commands {
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Optional key directory (overrides ENCJSON_KEYDIR)
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
         #[arg(short = 'k', long)]
         keydir: Option<PathBuf>,
 
@@ -136,7 +136,7 @@ enum Commands {
         #[arg(value_name = "INPUT", conflicts_with = "file")]
         input: Option<PathBuf>,
 
-        /// Optional key directory (overrides ENCJSON_KEYDIR)
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
         #[arg(short = 'k', long)]
         keydir: Option<PathBuf>,
 
