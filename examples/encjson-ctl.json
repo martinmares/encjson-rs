@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "public_hex": "0333595220a5f1321385b8eac8c700b5ed35ca9efe73fddf3ea1488a0f19b773",
+      "tenant": "cetin",
+      "status": "active",
+      "note": "db access"
+    },
+    {
+      "public_hex": "f5f657822c9a9dab5b214fa08c7ee2fe0d34f4e581d98f8b8a409b3ee06518a5",
+      "tenant": "o2",
+      "status": "active",
+      "note": "app deploy"
+    },
+    {
+      "public_hex": "6081b6dd62270efe1dcc305d1bb7dd4993f5fbd8cce354067a4b9c3a96774d43",
+      "tenant": "cez",
+      "status": "deprecated",
+      "note": "legacy"
+    }
+  ],
+  "tenants": [
+    "cetin",
+    "cez",
+    "o2"
+  ],
+  "statuses": [
+    "active",
+    "deprecated",
+    "hidden"
+  ]
+}

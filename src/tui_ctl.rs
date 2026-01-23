@@ -1,4 +1,7 @@
+use std::collections::BTreeSet;
+use std::env;
 use std::error::Error;
+use std::fs;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -11,6 +14,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
 use ratatui::Terminal;
+use serde::Deserialize;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
@@ -25,12 +29,19 @@ enum Mode {
     ConfirmExit,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 struct KeyItem {
     public_hex: String,
     tenant: String,
     status: String,
     note: String,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+struct CtlData {
+    items: Vec<KeyItem>,
+    tenants: Option<Vec<String>>,
+    statuses: Option<Vec<String>>,
 }
 
 struct App {
@@ -44,6 +55,9 @@ struct App {
     tenant_choices: Vec<String>,
     status_choices: Vec<String>,
     edit_field: usize,
+    data_path: Option<String>,
+    save_tenants: bool,
+    save_statuses: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -55,27 +69,104 @@ struct KeyDraft {
 
 impl App {
     fn new() -> Self {
-        Self {
-            items: sample_items(),
-            selected: 0,
-            mode: Mode::Normal,
-            status: "ready".to_string(),
-            filter: None,
-            input: Input::default(),
-            draft: None,
-            tenant_choices: vec![
+        let mut status = "ready".to_string();
+        let mut items = sample_items();
+        let mut tenant_choices = Vec::new();
+        let mut status_choices = Vec::new();
+        let mut data_path = None;
+        let mut save_tenants = false;
+        let mut save_statuses = false;
+
+        match load_ctl_data() {
+            Ok(Some(data)) => {
+                status = format!("mock data: {}", data_source_label());
+                items = data.items;
+                save_tenants = data.tenants.is_some();
+                save_statuses = data.statuses.is_some();
+                tenant_choices =
+                    merge_choices(data.tenants, items.iter().map(|item| item.tenant.clone()));
+                status_choices =
+                    merge_choices(data.statuses, items.iter().map(|item| item.status.clone()));
+                data_path = Some(data_source_label());
+            }
+            Ok(None) => {}
+            Err(err) => {
+                status = format!("mock load failed: {err}");
+            }
+        }
+
+        if tenant_choices.is_empty() {
+            tenant_choices = vec![
                 "cetin".to_string(),
                 "o2".to_string(),
                 "cez".to_string(),
-            ],
-            status_choices: vec![
+            ];
+        }
+        if status_choices.is_empty() {
+            status_choices = vec![
                 "active".to_string(),
                 "deprecated".to_string(),
                 "hidden".to_string(),
-            ],
+            ];
+        }
+
+        Self {
+            items,
+            selected: 0,
+            mode: Mode::Normal,
+            status,
+            filter: None,
+            input: Input::default(),
+            draft: None,
+            tenant_choices,
+            status_choices,
             edit_field: 0,
+            data_path,
+            save_tenants,
+            save_statuses,
         }
     }
+}
+
+fn load_ctl_data() -> Result<Option<CtlData>, Box<dyn Error>> {
+    let path = match env::var("ENCJSON_CTL_DATA") {
+        Ok(path) if !path.trim().is_empty() => path,
+        _ => return Ok(None),
+    };
+    let contents = fs::read_to_string(&path)?;
+    let data = serde_json::from_str::<CtlData>(&contents)?;
+    Ok(Some(data))
+}
+
+fn data_source_label() -> String {
+    env::var("ENCJSON_CTL_DATA").unwrap_or_else(|_| "default".to_string())
+}
+
+fn merge_choices<I>(primary: Option<Vec<String>>, extra: I) -> Vec<String>
+where
+    I: Iterator<Item = String>,
+{
+    let mut set = BTreeSet::new();
+    if let Some(list) = primary {
+        for item in list {
+            if !item.trim().is_empty() {
+                set.insert(item);
+            }
+        }
+    }
+    for item in extra {
+        if !item.trim().is_empty() {
+            set.insert(item);
+        }
+    }
+    set.into_iter().collect()
+}
+
+fn choice_index(choices: &[String], value: &str) -> usize {
+    choices
+        .iter()
+        .position(|item| item == value)
+        .unwrap_or(0)
 }
 
 pub fn run_ctl_ui() -> Result<(), Box<dyn Error>> {
@@ -180,11 +271,26 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                 }
             }
             KeyCode::Enter => match app.edit_field {
-                0 => app.mode = Mode::TenantSelect,
-                1 => app.mode = Mode::StatusSelect,
+                0 => {
+                    if let Some(draft) = app.draft.as_ref() {
+                        app.edit_field = choice_index(&app.tenant_choices, &draft.tenant);
+                    } else {
+                        app.edit_field = 0;
+                    }
+                    app.mode = Mode::TenantSelect;
+                }
+                1 => {
+                    if let Some(draft) = app.draft.as_ref() {
+                        app.edit_field = choice_index(&app.status_choices, &draft.status);
+                    } else {
+                        app.edit_field = 0;
+                    }
+                    app.mode = Mode::StatusSelect;
+                }
                 2 => {
                     if let Some(draft) = app.draft.as_ref() {
-                        app.input = Input::new(draft.note.clone());
+                        let len = draft.note.chars().count();
+                        app.input = Input::new(draft.note.clone()).with_cursor(len);
                     } else {
                         app.input = Input::default();
                     }
@@ -193,7 +299,16 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                 _ => {}
             },
             KeyCode::Char('s') => {
-                apply_draft(app);
+                match apply_draft(app) {
+                    Ok(saved) => {
+                        if saved {
+                            app.status = "saved".to_string();
+                        }
+                    }
+                    Err(err) => {
+                        app.status = format!("save failed: {err}");
+                    }
+                }
                 app.mode = Mode::Normal;
             }
             KeyCode::Esc => {
@@ -474,18 +589,19 @@ fn list_offset(selected: usize, height: usize) -> usize {
 }
 
 fn format_key_label(item: &KeyItem) -> String {
-    let short = short_hex(&item.public_hex);
     let tenant = truncate(&item.tenant, 10);
     let status = truncate(&item.status, 10);
     let note = truncate(&item.note, 18);
-    format!("{short:<10} {tenant:<10} {status:<10} {note}")
+    let public_hex = short_hex(&item.public_hex);
+    format!("{public_hex} {tenant:<10} {status:<10} {note}")
 }
 
 fn short_hex(value: &str) -> String {
-    if value.len() <= 8 {
+    if value.len() <= 12 {
         return value.to_string();
     }
-    format!("{}...", &value[..8])
+    let head_len = value.len() / 2;
+    format!("{}...", &value[..head_len])
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -522,10 +638,10 @@ fn selected_item(app: &App) -> Option<&KeyItem> {
     app.items.get(idx)
 }
 
-fn apply_draft(app: &mut App) {
+fn apply_draft(app: &mut App) -> Result<bool, Box<dyn Error>> {
     let indices = filtered_indices(app);
     if indices.is_empty() {
-        return;
+        return Ok(false);
     }
     let selected = app.selected.min(indices.len().saturating_sub(1));
     let idx = indices[selected];
@@ -535,7 +651,34 @@ fn apply_draft(app: &mut App) {
             item.status = draft.status;
             item.note = draft.note;
         }
+        persist_ctl_data(app)?;
+        return Ok(true);
     }
+    Ok(false)
+}
+
+fn persist_ctl_data(app: &App) -> Result<(), Box<dyn Error>> {
+    let Some(path) = app.data_path.as_ref() else {
+        return Ok(());
+    };
+    let tenants = if app.save_tenants {
+        Some(app.tenant_choices.clone())
+    } else {
+        None
+    };
+    let statuses = if app.save_statuses {
+        Some(app.status_choices.clone())
+    } else {
+        None
+    };
+    let data = CtlData {
+        items: app.items.clone(),
+        tenants,
+        statuses,
+    };
+    let contents = serde_json::to_string_pretty(&data)?;
+    fs::write(path, format!("{contents}\n"))?;
+    Ok(())
 }
 
 fn render_edit_dialog(f: &mut ratatui::Frame<'_>, app: &App) {
@@ -545,7 +688,6 @@ fn render_edit_dialog(f: &mut ratatui::Frame<'_>, app: &App) {
         .borders(Borders::ALL)
         .title(" Edit key ")
         .style(Style::default().fg(Color::Yellow));
-    let inner = block.inner(area);
     let mut lines = Vec::new();
     if let Some(item) = selected_item(app) {
         lines.push(Line::from(format!("public_hex: {}", item.public_hex)));
@@ -575,9 +717,6 @@ fn render_edit_dialog(f: &mut ratatui::Frame<'_>, app: &App) {
         .alignment(Alignment::Left)
         .style(Style::default().fg(Color::Yellow));
     f.render_widget(paragraph, area);
-    let cursor_x = inner.x + 1;
-    let cursor_y = inner.y + 2 + app.edit_field as u16;
-    f.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn render_select_dialog(
