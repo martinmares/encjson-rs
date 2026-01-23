@@ -35,4 +35,16 @@ pub enum Error {
 
     #[error("--write/-w is only supported for JSON output (use -o json)")]
     InvalidWriteForOutput,
+
+    #[error("HTTP error: {0}")]
+    Http(String),
+
+    #[error("Missing access token (run encjson login or set ENCJSON_ACCESS_TOKEN)")]
+    MissingAccessToken,
+
+    #[error("Missing vault URL (set ENCJSON_VAULT_URL or use --vault-url)")]
+    MissingVaultUrl,
+
+    #[error("Register requires --tenant and --note when public key is provided")]
+    RegisterMissingFields,
 }

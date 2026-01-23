@@ -2,6 +2,7 @@ mod crypto;
 mod error;
 mod json_utils;
 mod key_store;
+mod oidc_session;
 mod tui_edit;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -15,7 +16,7 @@ use std::sync::Once;
 use crate::crypto::{SecureBox, generate_key_pair};
 use crate::error::Error;
 use crate::json_utils::{TransformMode, dotenv_exports, env_exports, transform_json};
-use crate::key_store::{load_private_key, save_private_key};
+use crate::key_store::{list_public_keys, load_private_key, save_private_key};
 use crate::tui_edit::run_edit_ui;
 
 type Result<T> = std::result::Result<T, Error>;
@@ -30,6 +31,9 @@ struct Cli {
     /// Print version and exit (like `encjson -v`)
     #[arg(short = 'v', long = "version")]
     version: bool,
+
+    #[arg(long, global = true)]
+    insecure: Option<bool>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -148,6 +152,69 @@ enum Commands {
         #[arg(long, conflicts_with = "ui")]
         web: bool,
     },
+
+    /// Register local keys to vault (pending approval)
+    Register {
+        /// Optional public key to register explicitly
+        #[arg(value_name = "PUBLIC_HEX")]
+        public_hex: Option<String>,
+
+        /// Vault URL (overrides ENCJSON_VAULT_URL)
+        #[arg(long)]
+        vault_url: Option<String>,
+
+        /// Access token (overrides ENCJSON_ACCESS_TOKEN)
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Tenant name (required for explicit public_hex)
+        #[arg(long)]
+        tenant: Option<String>,
+
+        /// Note (required for explicit public_hex)
+        #[arg(long)]
+        note: Option<String>,
+
+        /// Tags (optional, can be repeated)
+        #[arg(long, action = clap::ArgAction::Append)]
+        tag: Vec<String>,
+
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
+        #[arg(short = 'k', long)]
+        keydir: Option<PathBuf>,
+    },
+
+    Login {
+        #[arg(long, required = true)]
+        url: String,
+        #[arg(long, default_value = "cli-tools")]
+        client: String,
+        #[arg(long, default_value = "8181")]
+        port: u16,
+        #[arg(long, default_value = "default")]
+        server: String,
+    },
+    Logout {
+        #[arg(long)]
+        server: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
+    },
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionsCommand {
+    #[command(alias = "ls")]
+    List,
+    Use {
+        #[arg(value_name = "SERVER")]
+        server: String,
+    },
 }
 
 fn main() {
@@ -160,14 +227,14 @@ fn main() {
     }
 
     if let Some(cmd) = cli.command {
-        if let Err(e) = run(cmd) {
+        if let Err(e) = run(cmd, cli.insecure.unwrap_or(false)) {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
     }
 }
 
-fn run(command: Commands) -> Result<()> {
+fn run(command: Commands, insecure: bool) -> Result<()> {
     match command {
         Commands::Init { keydir } => cmd_init(keydir),
         Commands::Encrypt {
@@ -196,7 +263,278 @@ fn run(command: Commands) -> Result<()> {
             ui,
             web,
         } => cmd_edit(file, input, keydir, ui, web),
+        Commands::Register {
+            public_hex,
+            vault_url,
+            token,
+            tenant,
+            note,
+            tag,
+            keydir,
+        } => cmd_register(public_hex, vault_url, token, tenant, note, tag, keydir),
+        Commands::Login {
+            url,
+            client,
+            port,
+            server,
+        } => run_async(oidc_session::handle_login(
+            "encjson",
+            &url,
+            &client,
+            port,
+            &server,
+            insecure,
+        )),
+        Commands::Logout { server, all } => {
+            if all {
+                oidc_session::delete_session("encjson", None)
+                    .map_err(|e| Error::Http(e.to_string()))?;
+                println!("All sessions removed.");
+            } else {
+                let target = server.as_deref();
+                oidc_session::delete_session("encjson", target)
+                    .map_err(|e| Error::Http(e.to_string()))?;
+                println!("Session removed.");
+            }
+            Ok(())
+        }
+        Commands::Sessions { command } => handle_sessions(&command),
+        Commands::Status => handle_status(),
     }
+}
+
+fn run_async<F>(future: F) -> Result<()>
+where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| Error::Http(e.to_string()))?;
+    runtime
+        .block_on(future)
+        .map_err(|e| Error::Http(e.to_string()))
+}
+
+fn handle_sessions(command: &SessionsCommand) -> Result<()> {
+    match command {
+        SessionsCommand::List => {
+            let config =
+                oidc_session::load_sessions("encjson").map_err(|e| Error::Http(e.to_string()))?;
+            if config.servers.is_empty() {
+                println!("No sessions found. Run 'encjson login' first.");
+                return Ok(());
+            }
+            println!("Active: {}", config.active);
+            for (name, session) in &config.servers {
+                let status = if name == &config.active { "*" } else { " " };
+                println!(
+                    "{status} {name} -> {} (expires {})",
+                    session.base_url,
+                    session.expires_at.format("%Y-%m-%d %H:%M:%S")
+                );
+            }
+        }
+        SessionsCommand::Use { server } => {
+            let mut config =
+                oidc_session::load_sessions("encjson").map_err(|e| Error::Http(e.to_string()))?;
+            if !config.servers.contains_key(server) {
+                return Err(Error::Http(format!("Session '{}' not found", server)));
+            }
+            config.active = server.to_string();
+            oidc_session::save_sessions("encjson", &config)
+                .map_err(|e| Error::Http(e.to_string()))?;
+            println!("Active session set to '{}'", server);
+        }
+    }
+    Ok(())
+}
+
+fn handle_status() -> Result<()> {
+    let config = oidc_session::load_sessions("encjson").map_err(|e| Error::Http(e.to_string()))?;
+    let Some(session) = config.servers.get(&config.active) else {
+        println!("Not logged in. Run 'encjson login --url <SERVER_URL>' first.");
+        return Ok(());
+    };
+    let valid = oidc_session::is_session_valid(session);
+    let expires_in = (session.expires_at - chrono::Utc::now()).num_seconds();
+    println!("Status: {}", if valid { "✓ Logged in" } else { "✗ Token expired" });
+    println!("Active server: {}", config.active);
+    println!("Server URL: {}", session.base_url);
+    println!("Token expires in: {} seconds ({} minutes)", expires_in, expires_in / 60);
+    println!("Session created: {}", session.created_at.format("%Y-%m-%d %H:%M:%S"));
+    if let Some(email) = &session.user_email {
+        println!("User: {}", email);
+    }
+    if !session.user_groups.is_empty() {
+        println!("Groups: {}", session.user_groups.join(", "));
+    }
+    if !valid {
+        println!("\nToken expired. Run 'encjson login' to re-authenticate.");
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct VaultKey {
+    public_hex: String,
+}
+
+#[derive(serde::Deserialize)]
+struct VaultRequest {
+    public_hex: String,
+}
+
+#[derive(serde::Serialize)]
+struct RegisterPayload {
+    public_hex: String,
+    tenant: String,
+    note: String,
+    tags: Vec<String>,
+}
+
+fn cmd_register(
+    public_hex: Option<String>,
+    vault_url: Option<String>,
+    token: Option<String>,
+    tenant: Option<String>,
+    note: Option<String>,
+    tags: Vec<String>,
+    keydir: Option<PathBuf>,
+) -> Result<()> {
+    let vault_url = vault_url
+        .or_else(|| std::env::var("ENCJSON_VAULT_URL").ok())
+        .ok_or(Error::MissingVaultUrl)?;
+    let token = token
+        .or_else(|| std::env::var("ENCJSON_ACCESS_TOKEN").ok())
+        .or_else(load_token_from_session)
+        .ok_or(Error::MissingAccessToken)?;
+
+    if let Some(public_hex) = public_hex {
+        let tenant = tenant.ok_or(Error::RegisterMissingFields)?;
+        let note = note.ok_or(Error::RegisterMissingFields)?;
+        send_register_request(&vault_url, &token, RegisterPayload {
+            public_hex,
+            tenant,
+            note,
+            tags,
+        })?;
+        println!("Register request submitted.");
+        return Ok(());
+    }
+
+    let local_keys = list_public_keys(keydir.as_deref())?;
+    if local_keys.is_empty() {
+        println!("No local keys found.");
+        return Ok(());
+    }
+
+    let remote_keys = fetch_remote_keys(&vault_url, &token)?;
+    let pending = fetch_pending_requests(&vault_url, &token)?;
+    let existing: std::collections::HashSet<String> = remote_keys
+        .into_iter()
+        .map(|k| k.public_hex)
+        .chain(pending.into_iter().map(|r| r.public_hex))
+        .collect();
+
+    let mut new_keys: Vec<String> = local_keys
+        .into_iter()
+        .filter(|k| !existing.contains(k))
+        .collect();
+    new_keys.sort();
+
+    if new_keys.is_empty() {
+        println!("No new keys to register.");
+        return Ok(());
+    }
+
+    for key in new_keys {
+        println!("Register key: {key}");
+        let tenant = prompt_input("tenant")?;
+        let note = prompt_input("note")?;
+        let tags = prompt_input("tags (comma-separated, optional)")?;
+        let tags = tags
+            .split(',')
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>();
+        send_register_request(&vault_url, &token, RegisterPayload {
+            public_hex: key,
+            tenant,
+            note,
+            tags,
+        })?;
+        println!("Submitted.");
+    }
+
+    Ok(())
+}
+
+fn prompt_input(label: &str) -> Result<String> {
+    print!("{label}: ");
+    io::Write::flush(&mut io::stdout())?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+fn load_token_from_session() -> Option<String> {
+    let config = oidc_session::load_sessions("encjson").ok()?;
+    let session = config.servers.get(&config.active)?;
+    Some(session.access_token.clone())
+}
+
+fn fetch_remote_keys(vault_url: &str, token: &str) -> Result<Vec<VaultKey>> {
+    let url = format!("{}/v1/keys", vault_url.trim_end_matches('/'));
+    let response = reqwest::blocking::Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    if !status.is_success() {
+        return Err(Error::Http(body.trim().to_string()));
+    }
+    serde_json::from_str(&body).map_err(Error::Json)
+}
+
+fn fetch_pending_requests(vault_url: &str, token: &str) -> Result<Vec<VaultRequest>> {
+    let url = format!(
+        "{}/v1/requests?status=pending",
+        vault_url.trim_end_matches('/')
+    );
+    let response = reqwest::blocking::Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    if !status.is_success() {
+        return Err(Error::Http(body.trim().to_string()));
+    }
+    serde_json::from_str(&body).map_err(Error::Json)
+}
+
+fn send_register_request(vault_url: &str, token: &str, payload: RegisterPayload) -> Result<()> {
+    let url = format!("{}/v1/requests", vault_url.trim_end_matches('/'));
+    let response = reqwest::blocking::Client::new()
+        .post(url)
+        .bearer_auth(token)
+        .json(&payload)
+        .send()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    if !status.is_success() {
+        return Err(Error::Http(body.trim().to_string()));
+    }
+    Ok(())
 }
 
 fn cmd_init(keydir: Option<PathBuf>) -> Result<()> {
