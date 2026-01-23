@@ -40,6 +40,7 @@
   - `ratatui`
   - `crossterm`
   - `tui-input`
+- Mock data přes JSON soubor (env `ENCJSON_CTL_DATA`).
 
 #### Session storage
 - Použít `dirs::config_dir()`.
@@ -101,4 +102,7 @@
 ## Status
 - [x] TUI kontrakt sladit s `encjson edit` (ratatui/crossterm/tui-input).
 - [x] Implementovat nový key dir přes `dirs` + migrace z `~/.encjson`.
-- [ ] Základní skeleton `encjson-ctl` (ratatui + crossterm).
+- [x] Základní skeleton `encjson-ctl` (ratatui + crossterm).
+- [x] TUI: list + detail + filter + confirm exit (bez API).
+- [x] Mock data source pro `encjson-ctl` (JSON přes `ENCJSON_CTL_DATA`).
+- [x] Mock persistence: `encjson-ctl` ukládá změny zpět do JSON (`ENCJSON_CTL_DATA`).
