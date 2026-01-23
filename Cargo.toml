@@ -1,9 +1,10 @@
 [package]
 name = "encjson"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 
 [dependencies]
+dirs = "6.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 clap = { version = "4", features = ["derive"] }
@@ -22,3 +23,4 @@ unicode-width = "0.2"
 time = { version = "0.3", features = ["formatting", "local-offset"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tui-input = "0.15"

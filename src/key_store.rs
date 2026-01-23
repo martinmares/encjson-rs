@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use dirs::data_dir;
+
 use crate::error::Error;
 
 #[cfg(not(windows))]
@@ -37,13 +39,15 @@ fn home_dir() -> Option<PathBuf> {
     None
 }
 
-/// Defaultní adresář pro klíče (~/.encjson nebo to, co je v ENCJSON_KEYDIR).
+/// Defaultní adresář pro klíče (OS-specific přes `dirs`, nebo to, co je v ENCJSON_KEYDIR).
 pub fn default_key_dir() -> PathBuf {
     if let Ok(dir) = env::var("ENCJSON_KEYDIR") {
         return PathBuf::from(dir);
     }
-    if let Some(home) = home_dir() {
-        return home.join(".encjson");
+    if let Some(base) = data_dir() {
+        let dir = base.join("encjson");
+        migrate_legacy_keys(&dir);
+        return dir;
     }
     // nouzový fallback - když fakt není žádný home
     PathBuf::from(".encjson")
@@ -84,6 +88,48 @@ pub fn save_private_key(
     let path = dir.join(public_hex);
     fs::write(&path, private_hex)?;
     Ok(path)
+}
+
+fn migrate_legacy_keys(new_dir: &Path) {
+    let Some(legacy_dir) = legacy_key_dir() else {
+        return;
+    };
+    if new_dir.exists() || !legacy_dir.exists() {
+        return;
+    }
+    if fs::create_dir_all(new_dir).is_err() {
+        return;
+    }
+    let entries = match fs::read_dir(&legacy_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+        if !is_hex_key_name(name) {
+            continue;
+        }
+        let target = new_dir.join(name);
+        let _ = fs::copy(&path, &target);
+    }
+}
+
+fn legacy_key_dir() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(".encjson"))
+}
+
+fn is_hex_key_name(name: &str) -> bool {
+    if name.len() != 64 {
+        return false;
+    }
+    name.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
