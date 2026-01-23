@@ -112,6 +112,7 @@ Properties:
 ### Prerequisites
 
 - Rust toolchain (stable), e.g. via [rustup](https://rustup.rs)
+- Docker (optional, for local Postgres)
 
 On most Linux systems, you only need a standard build environment:
 
@@ -136,6 +137,19 @@ The resulting binary will be in:
 
 ```text
 target/release/encjson
+```
+
+## Local Postgres (docker-compose)
+
+```bash
+docker compose up -d
+```
+
+Then set `.env` (see `.env.example`) and run the vault server:
+
+```bash
+export DATABASE_URL=postgres://encjson_admin:encjson_admin@localhost:5432/encjson
+cargo run --bin encjson-vault-server
 ```
 
 (You can copy or symlink it somewhere in `$PATH`, e.g. `/usr/local/bin/encjson`.)
@@ -173,6 +187,20 @@ Examples:
 encjson decrypt -f env.secured.json -k /etc/encjson
 encjson env -f env.secured.json -k /etc/encjson
 ```
+
+### Vault login (OIDC)
+
+```bash
+encjson login --url https://sso.cloud-app.cz
+encjson status
+encjson logout
+```
+
+Sessions file:
+
+- macOS: `~/Library/Application Support/encjson/sessions.json`
+- Linux: `~/.config/encjson/sessions.json`
+- perms `0600` (Unix)
 
 ### 1. Generate key pair (`init`)
 
