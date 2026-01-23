@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
 use ratatui::Terminal;
 use serde::Deserialize;
+use serde_json::Value;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
@@ -30,7 +31,7 @@ enum Mode {
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
-struct KeyItem {
+pub struct KeyItem {
     public_hex: String,
     tenant: String,
     status: String,
@@ -38,10 +39,10 @@ struct KeyItem {
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
-struct CtlData {
-    items: Vec<KeyItem>,
-    tenants: Option<Vec<String>>,
-    statuses: Option<Vec<String>>,
+pub struct CtlData {
+    pub items: Vec<KeyItem>,
+    pub tenants: Option<Vec<String>>,
+    pub statuses: Option<Vec<String>>,
 }
 
 struct App {
@@ -58,6 +59,8 @@ struct App {
     data_path: Option<String>,
     save_tenants: bool,
     save_statuses: bool,
+    read_only: bool,
+    remote: Option<RemoteConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +68,12 @@ struct KeyDraft {
     tenant: String,
     status: String,
     note: String,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteConfig {
+    base_url: String,
+    access_token: String,
 }
 
 impl App {
@@ -124,7 +133,59 @@ impl App {
             data_path,
             save_tenants,
             save_statuses,
+            read_only: false,
+            remote: None,
         }
+    }
+
+    fn from_data(data: Option<CtlData>, status: Option<String>, read_only: bool) -> Self {
+        let mut items = sample_items();
+        let mut tenant_choices = Vec::new();
+        let mut status_choices = Vec::new();
+        if let Some(data) = data {
+            items = data.items;
+            tenant_choices =
+                merge_choices(data.tenants, items.iter().map(|item| item.tenant.clone()));
+            status_choices =
+                merge_choices(data.statuses, items.iter().map(|item| item.status.clone()));
+        }
+        if tenant_choices.is_empty() {
+            tenant_choices = items
+                .iter()
+                .map(|item| item.tenant.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+        }
+        if status_choices.is_empty() {
+            status_choices = vec![
+                "active".to_string(),
+                "deprecated".to_string(),
+                "hidden".to_string(),
+            ];
+        }
+        Self {
+            items,
+            selected: 0,
+            mode: Mode::Normal,
+            status: status.unwrap_or_else(|| "ready".to_string()),
+            filter: None,
+            input: Input::default(),
+            draft: None,
+            tenant_choices,
+            status_choices,
+            edit_field: 0,
+            data_path: None,
+            save_tenants: false,
+            save_statuses: false,
+            read_only,
+            remote: None,
+        }
+    }
+
+    fn with_remote(mut self, base_url: String, access_token: String) -> Self {
+        self.remote = Some(RemoteConfig { base_url, access_token });
+        self
     }
 }
 
@@ -185,19 +246,82 @@ pub fn run_ctl_ui() -> Result<(), Box<dyn Error>> {
     res
 }
 
+#[allow(dead_code)]
+pub fn run_ctl_ui_with_data(
+    data: Option<CtlData>,
+    status: Option<String>,
+    read_only: bool,
+) -> Result<(), Box<dyn Error>> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut app = App::from_data(data, status, read_only);
+    let res = run_app_with(&mut terminal, &mut app);
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    res
+}
+
+pub fn run_ctl_ui_with_remote(
+    base_url: String,
+    access_token: String,
+) -> Result<(), Box<dyn Error>> {
+    let status = format!("remote: {}", base_url);
+    let data = fetch_remote_keys(&base_url, &access_token)?;
+    let tenants = fetch_remote_tenants(&base_url, &access_token)?;
+    let statuses = fetch_remote_statuses(&base_url, &access_token)?;
+    let mut app = App::from_data(
+        Some(CtlData {
+            items: data,
+            tenants: Some(tenants),
+            statuses: Some(statuses),
+        }),
+        Some(status),
+        false,
+    )
+    .with_remote(base_url, access_token);
+
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let res = run_app_with(&mut terminal, &mut app);
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    res
+}
+
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), Box<dyn Error>> {
     let mut app = App::new();
+    run_app_with(terminal, &mut app)
+}
+
+fn run_app_with(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+) -> Result<(), Box<dyn Error>> {
     let mut last_tick = Instant::now();
     let tick_rate = Duration::from_millis(200);
 
     loop {
-        terminal.draw(|f| render_ui(f, &app))?;
+        terminal.draw(|f| render_ui(f, app))?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    if handle_key(&mut app, key)? {
+                    if handle_key(app, key)? {
                         return Ok(());
                     }
                 }
@@ -226,6 +350,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                 move_selection(app, 10);
             }
             KeyCode::Enter | KeyCode::Char('e') => {
+                if app.read_only {
+                    app.status = "read-only".to_string();
+                    return Ok(false);
+                }
+                if let Some(remote) = &app.remote {
+                    if let Some(item) = selected_item(app) {
+                        match fetch_remote_key(remote, &item.public_hex) {
+                            Ok(updated) => update_item(app, updated),
+                            Err(err) => app.status = format!("detail fetch failed: {err}"),
+                        }
+                    }
+                }
                 if let Some(item) = selected_item(app) {
                     app.draft = Some(KeyDraft {
                         tenant: item.tenant.clone(),
@@ -467,6 +603,7 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
     );
 
     let help = match app.mode {
+        Mode::Normal if app.read_only => "help: Up/Down select | / filter | PgUp/PgDn | q quit",
         Mode::Normal => "help: Up/Down select | / filter | Enter edit | PgUp/PgDn | q quit",
         Mode::Filter => "Filter (case-insensitive) | Enter apply | Esc cancel",
         Mode::Edit => "Edit fields | Enter select | s save | Esc cancel",
@@ -646,7 +783,10 @@ fn apply_draft(app: &mut App) -> Result<bool, Box<dyn Error>> {
     let selected = app.selected.min(indices.len().saturating_sub(1));
     let idx = indices[selected];
     if let Some(draft) = app.draft.take() {
-        if let Some(item) = app.items.get_mut(idx) {
+        if let Some(remote) = &app.remote {
+            let updated = update_remote_key(remote, &app.items[idx].public_hex, &draft)?;
+            update_item(app, updated);
+        } else if let Some(item) = app.items.get_mut(idx) {
             item.tenant = draft.tenant;
             item.status = draft.status;
             item.note = draft.note;
@@ -655,6 +795,107 @@ fn apply_draft(app: &mut App) -> Result<bool, Box<dyn Error>> {
         return Ok(true);
     }
     Ok(false)
+}
+
+fn update_item(app: &mut App, updated: KeyItem) {
+    if let Some(pos) = app.items.iter().position(|item| item.public_hex == updated.public_hex) {
+        app.items[pos] = updated;
+    }
+}
+
+fn remote_url(base_url: &str, path: &str) -> String {
+    format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'))
+}
+
+fn fetch_remote_keys(base_url: &str, access_token: &str) -> Result<Vec<KeyItem>, Box<dyn Error>> {
+    let client = reqwest::blocking::Client::new();
+    let url = remote_url(base_url, "/v1/keys");
+    let response = client.get(url).bearer_auth(access_token).send()?;
+    let status = response.status();
+    let body = response.text()?;
+    if !status.is_success() {
+        return Err(format!("vault request failed ({}): {}", status, body.trim()).into());
+    }
+    let items: Vec<KeyItem> = serde_json::from_str(&body)?;
+    Ok(items)
+}
+
+fn fetch_remote_key(remote: &RemoteConfig, public_hex: &str) -> Result<KeyItem, Box<dyn Error>> {
+    let client = reqwest::blocking::Client::new();
+    let url = remote_url(&remote.base_url, &format!("/v1/keys/{}", public_hex));
+    let response = client
+        .get(url)
+        .bearer_auth(&remote.access_token)
+        .send()?;
+    let status = response.status();
+    let body = response.text()?;
+    if !status.is_success() {
+        return Err(format!("vault request failed ({}): {}", status, body.trim()).into());
+    }
+    let item: KeyItem = serde_json::from_str(&body)?;
+    Ok(item)
+}
+
+fn fetch_remote_tenants(
+    base_url: &str,
+    access_token: &str,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let client = reqwest::blocking::Client::new();
+    let url = remote_url(base_url, "/v1/tenants");
+    let response = client.get(url).bearer_auth(access_token).send()?;
+    let status = response.status();
+    let body = response.text()?;
+    if !status.is_success() {
+        return Err(format!("vault request failed ({}): {}", status, body.trim()).into());
+    }
+    let tenants: Vec<Value> = serde_json::from_str(&body)?;
+    let names = tenants
+        .into_iter()
+        .filter_map(|value| value.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .collect();
+    Ok(names)
+}
+
+fn fetch_remote_statuses(
+    base_url: &str,
+    access_token: &str,
+) -> Result<Vec<String>, Box<dyn Error>> {
+    let client = reqwest::blocking::Client::new();
+    let url = remote_url(base_url, "/v1/statuses");
+    let response = client.get(url).bearer_auth(access_token).send()?;
+    let status = response.status();
+    let body = response.text()?;
+    if !status.is_success() {
+        return Err(format!("vault request failed ({}): {}", status, body.trim()).into());
+    }
+    let statuses: Vec<String> = serde_json::from_str(&body)?;
+    Ok(statuses)
+}
+
+fn update_remote_key(
+    remote: &RemoteConfig,
+    public_hex: &str,
+    draft: &KeyDraft,
+) -> Result<KeyItem, Box<dyn Error>> {
+    let client = reqwest::blocking::Client::new();
+    let url = remote_url(&remote.base_url, &format!("/v1/keys/{}", public_hex));
+    let body = serde_json::json!({
+        "tenant": draft.tenant,
+        "status": draft.status,
+        "note": draft.note,
+    });
+    let response = client
+        .patch(url)
+        .bearer_auth(&remote.access_token)
+        .json(&body)
+        .send()?;
+    let status = response.status();
+    let text = response.text()?;
+    if !status.is_success() {
+        return Err(format!("vault update failed ({}): {}", status, text.trim()).into());
+    }
+    let updated: KeyItem = serde_json::from_str(&text)?;
+    Ok(updated)
 }
 
 fn persist_ctl_data(app: &App) -> Result<(), Box<dyn Error>> {

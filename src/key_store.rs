@@ -90,6 +90,33 @@ pub fn save_private_key(
     Ok(path)
 }
 
+/// List all public keys in the key directory.
+pub fn list_public_keys(key_dir: Option<&Path>) -> Result<Vec<String>, Error> {
+    let dir = key_dir.map(PathBuf::from).unwrap_or_else(default_key_dir);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(Error::Io(e)),
+    };
+    let mut keys = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+        if !is_hex_key_name(name) {
+            continue;
+        }
+        keys.push(name.to_string());
+    }
+    keys.sort();
+    Ok(keys)
+}
+
 fn migrate_legacy_keys(new_dir: &Path) {
     let Some(legacy_dir) = legacy_key_dir() else {
         return;
