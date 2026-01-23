@@ -298,15 +298,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
                 app.mode = Mode::ConfirmDelete;
             }
         }
-        KeyCode::Char('q') | KeyCode::Esc => {
-            if app.entries.iter().any(|e| e.dirty)
-                || !app.deleted_keys.is_empty()
-                || app.order_changed
-            {
-                app.mode = Mode::ConfirmExit;
-            } else {
-                return Some(ExitAction::Discard);
-            }
+        KeyCode::Char('q') => {
+            app.mode = Mode::ConfirmExit;
         }
         _ => {}
     }
