@@ -4,6 +4,7 @@ mod json_utils;
 mod key_store;
 mod oidc_session;
 mod tui_edit;
+mod tui_register;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
@@ -493,27 +494,15 @@ fn cmd_register(
         return Ok(());
     }
 
-    for key in new_keys {
-        println!("Register key: {key}");
-        let tenant = prompt_input("tenant")?;
-        let note = prompt_input("note")?;
-        let tags = prompt_input("tags (comma-separated, optional)")?;
-        let tags = tags
-            .split(',')
-            .map(|t| t.trim())
-            .filter(|t| !t.is_empty())
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>();
-        let private_hex = load_private_key(&key, keydir.as_deref())?;
-        send_register_request(&vault_url, &token, RegisterPayload {
-            public_hex: key,
-            private_hex,
-            tenant,
-            note,
-            tags,
-        })?;
-        println!("Submitted.");
-    }
+    let tenants = fetch_remote_tenants(&vault_url, &token)?;
+    tui_register::run_register_tui(
+        new_keys,
+        tenants,
+        vault_url,
+        token,
+        keydir,
+    )
+    .map_err(|e| Error::Http(e.to_string()))?;
 
     Ok(())
 }
@@ -528,14 +517,6 @@ fn cmd_list(keydir: Option<PathBuf>) -> Result<()> {
         println!("{key}");
     }
     Ok(())
-}
-
-fn prompt_input(label: &str) -> Result<String> {
-    print!("{label}: ");
-    io::Write::flush(&mut io::stdout())?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
 }
 
 fn load_token_from_session() -> Option<String> {
@@ -559,6 +540,30 @@ fn fetch_remote_keys(vault_url: &str, token: &str) -> Result<Vec<VaultKey>> {
         return Err(Error::Http(body.trim().to_string()));
     }
     serde_json::from_str(&body).map_err(Error::Json)
+}
+
+#[derive(serde::Deserialize)]
+struct VaultTenant {
+    name: String,
+}
+
+fn fetch_remote_tenants(vault_url: &str, token: &str) -> Result<Vec<String>> {
+    let url = format!("{}/v1/tenants", vault_url.trim_end_matches('/'));
+    let response = reqwest::blocking::Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    if !status.is_success() {
+        return Err(Error::Http(body.trim().to_string()));
+    }
+    let items: Vec<VaultTenant> =
+        serde_json::from_str(&body).map_err(|e| Error::Http(e.to_string()))?;
+    Ok(items.into_iter().map(|t| t.name).collect())
 }
 
 fn fetch_pending_requests(vault_url: &str, token: &str) -> Result<Vec<VaultRequest>> {
