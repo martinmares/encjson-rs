@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use chrono::{DateTime, Utc};
@@ -35,6 +35,7 @@ struct KeyRow {
     tenant: String,
     status: String,
     note: Option<String>,
+    tags: Vec<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -44,6 +45,7 @@ struct KeyPatch {
     tenant: Option<String>,
     status: Option<String>,
     note: Option<String>,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -54,8 +56,19 @@ struct TenantRow {
 }
 
 #[derive(Deserialize)]
+struct TenantCreate {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct TenantRename {
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct RequestCreate {
     public_hex: String,
+    private_hex: String,
     tenant: String,
     note: String,
     tags: Option<Vec<String>>,
@@ -66,11 +79,19 @@ struct RequestApprove {
     tenant: Option<String>,
     status: Option<String>,
     note: Option<String>,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
 struct RequestReject {
     reason: String,
+}
+
+#[derive(Deserialize)]
+struct RequestPatch {
+    tenant: Option<String>,
+    note: Option<String>,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -86,6 +107,28 @@ struct RequestRow {
     decided_by: Option<String>,
     decided_at: Option<DateTime<Utc>>,
     decision_note: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct RequestRowSecret {
+    public_hex: String,
+    private_hex: Option<String>,
+    tenant: String,
+    note: String,
+    tags: Vec<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct KeyPrivateRow {
+    public_hex: String,
+    tenant: String,
+    private_hex: Option<String>,
+}
+
+#[derive(Serialize)]
+struct KeyPrivateResponse {
+    public_hex: String,
+    private_hex: String,
 }
 
 #[tokio::main]
@@ -139,10 +182,13 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/v1/keys", get(list_keys))
         .route("/v1/keys/{public_hex}", get(get_key).patch(patch_key))
+        .route("/v1/keys/{public_hex}/private", get(get_private_key))
         .route("/v1/me", get(get_me))
-        .route("/v1/tenants", get(list_tenants))
+        .route("/v1/tenants", get(list_tenants).post(create_tenant))
+        .route("/v1/tenants/{name}", patch(rename_tenant).delete(delete_tenant))
         .route("/v1/statuses", get(list_statuses))
         .route("/v1/requests", get(list_requests).post(create_request))
+        .route("/v1/requests/{id}", patch(update_request))
         .route("/v1/requests/{id}/approve", post(approve_request))
         .route("/v1/requests/{id}/reject", post(reject_request))
         .with_state(state);
@@ -162,7 +208,7 @@ async fn list_keys(
         Err(resp) => return resp,
     };
     let mut builder = QueryBuilder::<Postgres>::new(
-        "select public_hex, tenant, status, note, created_at, updated_at from keys",
+        "select public_hex, tenant, status, note, tags, created_at, updated_at from keys",
     );
     let mut has_where = false;
     let tenant_filter = if auth.is_admin {
@@ -227,7 +273,7 @@ async fn get_key(
         Err(resp) => return resp,
     };
     let row = sqlx::query_as::<_, KeyRow>(
-        "select public_hex, tenant, status, note, created_at, updated_at from keys where public_hex = $1",
+        "select public_hex, tenant, status, note, tags, created_at, updated_at from keys where public_hex = $1",
     )
     .bind(public_hex)
     .fetch_optional(&state.db)
@@ -238,6 +284,41 @@ async fn get_key(
                 return (StatusCode::FORBIDDEN, "tenant not allowed").into_response();
             }
             Json(row).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(err) => server_error(err),
+    }
+}
+
+async fn get_private_key(
+    State(state): State<AppState>,
+    Path(public_hex): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let auth = match ensure_auth(&state, &headers) {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    let row = sqlx::query_as::<_, KeyPrivateRow>(
+        "select public_hex, tenant, private_hex from keys where public_hex = $1",
+    )
+    .bind(public_hex)
+    .fetch_optional(&state.db)
+    .await;
+
+    match row {
+        Ok(Some(row)) => {
+            if !auth.is_admin && !auth.tenants.contains(&row.tenant) {
+                return (StatusCode::FORBIDDEN, "tenant not allowed").into_response();
+            }
+            let Some(private_hex) = row.private_hex else {
+                return (StatusCode::NOT_FOUND, "private key not available").into_response();
+            };
+            Json(KeyPrivateResponse {
+                public_hex: row.public_hex,
+                private_hex,
+            })
+            .into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(err) => server_error(err),
@@ -262,7 +343,7 @@ async fn patch_key(
         Err(err) => return server_error(err),
     };
     let existing = match sqlx::query_as::<_, KeyRow>(
-        "select public_hex, tenant, status, note, created_at, updated_at from keys where public_hex = $1",
+        "select public_hex, tenant, status, note, tags, created_at, updated_at from keys where public_hex = $1",
     )
     .bind(&public_hex)
     .fetch_optional(&mut *tx)
@@ -276,15 +357,17 @@ async fn patch_key(
     let tenant = payload.tenant.unwrap_or(existing.tenant);
     let status = payload.status.unwrap_or(existing.status);
     let note = payload.note.or(existing.note);
+    let tags = payload.tags.unwrap_or(existing.tags);
 
     let updated = sqlx::query_as::<_, KeyRow>(
-        "update keys set tenant = $2, status = $3, note = $4, updated_at = now() \
-         where public_hex = $1 returning public_hex, tenant, status, note, created_at, updated_at",
+        "update keys set tenant = $2, status = $3, note = $4, tags = $5, updated_at = now() \
+         where public_hex = $1 returning public_hex, tenant, status, note, tags, created_at, updated_at",
     )
     .bind(&public_hex)
     .bind(tenant)
     .bind(status)
     .bind(note)
+    .bind(tags)
     .fetch_one(&mut *tx)
     .await;
 
@@ -321,6 +404,165 @@ async fn list_tenants(
     }
 }
 
+async fn create_tenant(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<TenantCreate>,
+) -> impl IntoResponse {
+    let auth = match ensure_auth(&state, &headers) {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    if !auth.is_admin {
+        return (StatusCode::FORBIDDEN, "admin required").into_response();
+    }
+    let name = payload.name.trim();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name required").into_response();
+    }
+    let row = sqlx::query_as::<_, TenantRow>(
+        "insert into tenants (name) values ($1) returning id, name, created_at",
+    )
+    .bind(name)
+    .fetch_one(&state.db)
+    .await;
+    match row {
+        Ok(row) => Json(row).into_response(),
+        Err(err) => server_error(err),
+    }
+}
+
+async fn rename_tenant(
+    State(state): State<AppState>,
+    Path(old_name): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<TenantRename>,
+) -> impl IntoResponse {
+    let auth = match ensure_auth(&state, &headers) {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    if !auth.is_admin {
+        return (StatusCode::FORBIDDEN, "admin required").into_response();
+    }
+    let new_name = payload.name.trim();
+    if new_name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "name required").into_response();
+    }
+
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(err) => return server_error(err),
+    };
+
+    let row = match sqlx::query_as::<_, TenantRow>(
+        "update tenants set name = $2 where name = $1 returning id, name, created_at",
+    )
+    .bind(&old_name)
+    .bind(new_name)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
+        Err(err) => return server_error(err),
+    };
+
+    let _ = sqlx::query("update keys set tenant = $2 where tenant = $1")
+        .bind(&old_name)
+        .bind(new_name)
+        .execute(&mut *tx)
+        .await;
+    let _ = sqlx::query("update requests set tenant = $2 where tenant = $1")
+        .bind(&old_name)
+        .bind(new_name)
+        .execute(&mut *tx)
+        .await;
+
+    if let Err(err) = tx.commit().await {
+        return server_error(err);
+    }
+    Json(row).into_response()
+}
+
+async fn delete_tenant(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let auth = match ensure_auth(&state, &headers) {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    if !auth.is_admin {
+        return (StatusCode::FORBIDDEN, "admin required").into_response();
+    }
+
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(err) => return server_error(err),
+    };
+
+    let tenant = match sqlx::query_scalar::<_, i64>("select count(*) from tenants where name = $1")
+        .bind(&name)
+        .fetch_one(&mut *tx)
+        .await
+    {
+        Ok(count) => count,
+        Err(err) => return server_error(err),
+    };
+    if tenant == 0 {
+        return (StatusCode::NOT_FOUND, "tenant not found").into_response();
+    }
+
+    let keys_count =
+        match sqlx::query_scalar::<_, i64>("select count(*) from keys where tenant = $1")
+            .bind(&name)
+            .fetch_one(&mut *tx)
+            .await
+        {
+            Ok(count) => count,
+            Err(err) => return server_error(err),
+        };
+    if keys_count > 0 {
+        return (
+            StatusCode::CONFLICT,
+            "tenant has associated keys",
+        )
+            .into_response();
+    }
+    let requests_count = match sqlx::query_scalar::<_, i64>(
+        "select count(*) from requests where tenant = $1",
+    )
+    .bind(&name)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(count) => count,
+        Err(err) => return server_error(err),
+    };
+    if requests_count > 0 {
+        return (
+            StatusCode::CONFLICT,
+            "tenant has associated requests",
+        )
+            .into_response();
+    }
+
+    let delete = sqlx::query("delete from tenants where name = $1")
+        .bind(&name)
+        .execute(&mut *tx)
+        .await;
+    if let Err(err) = delete {
+        return server_error(err);
+    }
+    if let Err(err) = tx.commit().await {
+        return server_error(err);
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
 async fn list_statuses(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -352,6 +594,12 @@ async fn create_request(
     if !auth.is_admin && !auth.is_scoped {
         return (StatusCode::FORBIDDEN, "role not allowed").into_response();
     }
+    if !is_hex_64(&payload.public_hex) {
+        return (StatusCode::BAD_REQUEST, "invalid public_hex").into_response();
+    }
+    if !is_hex_64(&payload.private_hex) {
+        return (StatusCode::BAD_REQUEST, "invalid private_hex").into_response();
+    }
     let tags = payload.tags.unwrap_or_default();
     let requested_by = headers
         .get("x-user")
@@ -360,12 +608,13 @@ async fn create_request(
         .or(auth.subject.clone());
 
     let row = sqlx::query_as::<_, RequestRow>(
-        "insert into requests (public_hex, tenant, note, tags, requested_by) \
-         values ($1, $2, $3, $4, $5) \
+        "insert into requests (public_hex, private_hex, tenant, note, tags, requested_by) \
+         values ($1, $2, $3, $4, $5, $6) \
          returning id, public_hex, tenant, note, tags, status, requested_by, \
                    requested_at, decided_by, decided_at, decision_note",
     )
     .bind(payload.public_hex)
+    .bind(payload.private_hex)
     .bind(payload.tenant)
     .bind(payload.note)
     .bind(tags)
@@ -421,6 +670,70 @@ async fn list_requests(
     }
 }
 
+async fn update_request(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(payload): Json<RequestPatch>,
+) -> impl IntoResponse {
+    let auth = match ensure_auth(&state, &headers) {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+    if !auth.is_admin {
+        return (StatusCode::FORBIDDEN, "admin required").into_response();
+    }
+    let mut tx = match state.db.begin().await {
+        Ok(tx) => tx,
+        Err(err) => return server_error(err),
+    };
+    let req = match sqlx::query_as::<_, RequestRow>(
+        "select id, public_hex, tenant, note, tags, status, requested_by, requested_at, \
+                decided_by, decided_at, decision_note \
+         from requests where id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(err) => return server_error(err),
+    };
+    if req.status != "pending" {
+        return (StatusCode::CONFLICT, "request not pending").into_response();
+    }
+    let tenant = payload.tenant.unwrap_or(req.tenant.clone());
+    let note = payload.note.unwrap_or(req.note.clone());
+    let tags = payload.tags.unwrap_or(req.tags.clone());
+
+    let updated = sqlx::query_as::<_, RequestRow>(
+        "update requests set tenant = $2, note = $3, tags = $4 where id = $1 \
+         returning id, public_hex, tenant, note, tags, status, requested_by, requested_at, \
+                   decided_by, decided_at, decision_note",
+    )
+    .bind(id)
+    .bind(&tenant)
+    .bind(&note)
+    .bind(&tags)
+    .fetch_one(&mut *tx)
+    .await;
+
+    match updated {
+        Ok(row) => {
+            if let Err(err) = tx.commit().await {
+                return server_error(err);
+            }
+            Json(row).into_response()
+        }
+        Err(err) => server_error(err),
+    }
+}
+
+fn is_hex_64(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 async fn load_jwks(url: &str) -> anyhow::Result<std::collections::HashMap<String, DecodingKey>> {
     let body = reqwest::get(url).await?.text().await?;
     let set: JwkSet = serde_json::from_str(&body)?;
@@ -457,10 +770,8 @@ async fn approve_request(
         Ok(tx) => tx,
         Err(err) => return server_error(err),
     };
-    let req = match sqlx::query_as::<_, RequestRow>(
-        "select id, public_hex, tenant, note, tags, status, requested_by, requested_at, \
-                decided_by, decided_at, decision_note \
-         from requests where id = $1",
+    let req = match sqlx::query_as::<_, RequestRowSecret>(
+        "select public_hex, private_hex, tenant, note, tags from requests where id = $1",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -470,33 +781,41 @@ async fn approve_request(
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(err) => return server_error(err),
     };
+    let Some(private_hex) = req.private_hex.clone() else {
+        return (StatusCode::BAD_REQUEST, "private key missing in request").into_response();
+    };
 
     let tenant = payload.tenant.unwrap_or(req.tenant.clone());
     let status = payload.status.unwrap_or_else(|| "active".to_string());
     let note = payload.note.unwrap_or(req.note.clone());
+    let tags = payload.tags.unwrap_or(req.tags.clone());
 
     let _ = sqlx::query(
-        "insert into keys (public_hex, tenant, status, note) \
-         values ($1, $2, $3, $4) \
+        "insert into keys (public_hex, private_hex, tenant, status, note, tags) \
+         values ($1, $2, $3, $4, $5, $6) \
          on conflict (public_hex) do update \
-         set tenant = excluded.tenant, status = excluded.status, note = excluded.note, updated_at = now()",
+         set private_hex = excluded.private_hex, tenant = excluded.tenant, \
+             status = excluded.status, note = excluded.note, tags = excluded.tags, updated_at = now()",
     )
     .bind(&req.public_hex)
+    .bind(private_hex)
     .bind(&tenant)
     .bind(&status)
     .bind(&note)
+    .bind(&tags)
     .execute(&mut *tx)
     .await;
 
     let updated = sqlx::query_as::<_, RequestRow>(
-        "update requests set status = 'approved', tenant = $2, note = $3, \
-         decided_by = $4, decided_at = now(), decision_note = $5 where id = $1 \
+        "update requests set status = 'approved', tenant = $2, note = $3, tags = $4, \
+         decided_by = $5, decided_at = now(), decision_note = $6 where id = $1 \
          returning id, public_hex, tenant, note, tags, status, requested_by, requested_at, \
                    decided_by, decided_at, decision_note",
     )
     .bind(id)
     .bind(&tenant)
     .bind(&note)
+    .bind(&tags)
     .bind(decided_by)
     .bind(None::<String>)
     .fetch_one(&mut *tx)
