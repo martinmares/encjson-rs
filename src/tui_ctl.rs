@@ -1,7 +1,5 @@
 use std::collections::BTreeSet;
-use std::env;
 use std::error::Error;
-use std::fs;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -95,9 +93,6 @@ struct App {
     tags: Vec<String>,
     requests: Vec<RequestItem>,
     edit_field: usize,
-    data_path: Option<String>,
-    save_tenants: bool,
-    save_statuses: bool,
     dirty: bool,
     help_active: bool,
     read_only: bool,
@@ -134,89 +129,8 @@ struct RemoteConfig {
 }
 
 impl App {
-    fn new() -> Self {
-        let mut status_base = "ready".to_string();
-        let mut items = sample_items();
-        let mut requests = Vec::new();
-        let mut tenant_choices = Vec::new();
-        let mut status_choices = Vec::new();
-        let mut tenants = Vec::new();
-        let mut tags = Vec::new();
-        let mut data_path = None;
-        let mut save_tenants = false;
-        let mut save_statuses = false;
-
-        match load_ctl_data() {
-            Ok(Some(data)) => {
-                status_base = format!("mock data: {}", data_source_label());
-                items = data.items;
-                requests = data.requests.unwrap_or_default();
-                save_tenants = data.tenants.is_some();
-                save_statuses = data.statuses.is_some();
-                tenant_choices =
-                    merge_choices(data.tenants, items.iter().map(|item| item.tenant.clone()));
-                status_choices =
-                    merge_choices(data.statuses, items.iter().map(|item| item.status.clone()));
-                tenants = tenant_choices.clone();
-                tags = data.tags.unwrap_or_default();
-                data_path = Some(data_source_label());
-            }
-            Ok(None) => {}
-            Err(err) => {
-                status_base = format!("mock load failed: {err}");
-            }
-        }
-
-        if tenant_choices.is_empty() {
-            tenant_choices = vec![
-                "cetin".to_string(),
-                "o2".to_string(),
-                "cez".to_string(),
-            ];
-        }
-        if status_choices.is_empty() {
-            status_choices = vec![
-                "active".to_string(),
-                "deprecated".to_string(),
-                "hidden".to_string(),
-            ];
-        }
-        if tenants.is_empty() {
-            tenants = tenant_choices.clone();
-        }
-
-        Self {
-            view: View::Keys,
-            items,
-            selected_keys: 0,
-            selected_tenants: 0,
-            selected_tags: 0,
-            selected_requests: 0,
-            mode: Mode::Normal,
-            status_base,
-            status_temp: None,
-            filter: None,
-            input: Input::default(),
-            draft: None,
-            request_draft: None,
-            tenant_choices,
-            status_choices,
-            tenants,
-            tags,
-            requests,
-            edit_field: 0,
-            data_path,
-            save_tenants,
-            save_statuses,
-            dirty: false,
-            help_active: false,
-            read_only: false,
-            remote: None,
-        }
-    }
-
     fn from_data(data: Option<CtlData>, status: Option<String>, read_only: bool) -> Self {
-        let mut items = sample_items();
+        let mut items = Vec::new();
         let mut requests = Vec::new();
         let mut tenant_choices = Vec::new();
         let mut status_choices = Vec::new();
@@ -270,9 +184,6 @@ impl App {
             tags,
             requests,
             edit_field: 0,
-            data_path: None,
-            save_tenants: false,
-            save_statuses: false,
             dirty: false,
             help_active: false,
             read_only,
@@ -284,20 +195,6 @@ impl App {
         self.remote = Some(RemoteConfig { base_url, access_token });
         self
     }
-}
-
-fn load_ctl_data() -> Result<Option<CtlData>, Box<dyn Error>> {
-    let path = match env::var("ENCJSON_CTL_DATA") {
-        Ok(path) if !path.trim().is_empty() => path,
-        _ => return Ok(None),
-    };
-    let contents = fs::read_to_string(&path)?;
-    let data = serde_json::from_str::<CtlData>(&contents)?;
-    Ok(Some(data))
-}
-
-fn data_source_label() -> String {
-    env::var("ENCJSON_CTL_DATA").unwrap_or_else(|_| "default".to_string())
 }
 
 fn merge_choices<I>(primary: Option<Vec<String>>, extra: I) -> Vec<String>
@@ -325,44 +222,6 @@ fn choice_index(choices: &[String], value: &str) -> usize {
         .iter()
         .position(|item| item == value)
         .unwrap_or(0)
-}
-
-pub fn run_ctl_ui() -> Result<(), Box<dyn Error>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let res = run_app(&mut terminal);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    res
-}
-
-#[allow(dead_code)]
-pub fn run_ctl_ui_with_data(
-    data: Option<CtlData>,
-    status: Option<String>,
-    read_only: bool,
-) -> Result<(), Box<dyn Error>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let mut app = App::from_data(data, status, read_only);
-    let res = run_app_with(&mut terminal, &mut app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    res
 }
 
 pub fn run_ctl_ui_with_remote(
@@ -400,11 +259,6 @@ pub fn run_ctl_ui_with_remote(
     terminal.show_cursor()?;
 
     res
-}
-
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(), Box<dyn Error>> {
-    let mut app = App::new();
-    run_app_with(terminal, &mut app)
 }
 
 fn run_app_with(
@@ -1725,7 +1579,6 @@ fn add_tenant(app: &mut App, name: String) -> Result<(), Box<dyn Error>> {
         app.tenant_choices.push(name);
         app.tenant_choices.sort();
     }
-    persist_ctl_data(app)?;
     Ok(())
 }
 
@@ -1760,7 +1613,6 @@ fn rename_tenant(app: &mut App, new_name: String) -> Result<(), Box<dyn Error>> 
     }
     app.tenants.sort();
     app.tenant_choices.sort();
-    persist_ctl_data(app)?;
     Ok(())
 }
 
@@ -1776,7 +1628,6 @@ fn delete_tenant(app: &mut App) -> Result<(), Box<dyn Error>> {
     if app.selected_tenants > 0 && app.selected_tenants >= app.tenants.len() {
         app.selected_tenants = app.tenants.len().saturating_sub(1);
     }
-    persist_ctl_data(app)?;
     Ok(())
 }
 
@@ -1796,7 +1647,6 @@ fn approve_request(app: &mut App) -> Result<(), Box<dyn Error>> {
         app.items = fetch_remote_keys(&remote.base_url, &remote.access_token)?;
     } else {
         app.requests.retain(|item| item.id != request.id);
-        persist_ctl_data(app)?;
     }
     Ok(())
 }
@@ -1811,7 +1661,6 @@ fn reject_request(app: &mut App, reason: String) -> Result<(), Box<dyn Error>> {
         app.items = fetch_remote_keys(&remote.base_url, &remote.access_token)?;
     } else {
         app.requests.retain(|item| item.id != request.id);
-        persist_ctl_data(app)?;
     }
     Ok(())
 }
@@ -1832,7 +1681,6 @@ fn apply_request_draft(app: &mut App) -> Result<bool, Box<dyn Error>> {
         item.tenant = draft.tenant.clone();
         item.note = draft.note.clone();
         item.tags = draft.tags.clone();
-        persist_ctl_data(app)?;
     }
     Ok(true)
 }
@@ -1854,7 +1702,6 @@ fn apply_draft(app: &mut App) -> Result<bool, Box<dyn Error>> {
             item.note = draft.note;
             item.tags = draft.tags;
         }
-        persist_ctl_data(app)?;
         return Ok(true);
     }
     Ok(false)
@@ -2122,36 +1969,6 @@ fn update_remote_key(
     Ok(updated)
 }
 
-fn persist_ctl_data(app: &App) -> Result<(), Box<dyn Error>> {
-    let Some(path) = app.data_path.as_ref() else {
-        return Ok(());
-    };
-    let tenants = if app.save_tenants {
-        Some(app.tenant_choices.clone())
-    } else {
-        None
-    };
-    let statuses = if app.save_statuses {
-        Some(app.status_choices.clone())
-    } else {
-        None
-    };
-    let data = CtlData {
-        items: app.items.clone(),
-        tenants,
-        statuses,
-        tags: if app.tags.is_empty() { None } else { Some(app.tags.clone()) },
-        requests: if app.requests.is_empty() {
-            None
-        } else {
-            Some(app.requests.clone())
-        },
-    };
-    let contents = serde_json::to_string_pretty(&data)?;
-    fs::write(path, format!("{contents}\n"))?;
-    Ok(())
-}
-
 fn render_edit_dialog(f: &mut ratatui::Frame<'_>, app: &App) {
     let area = centered_rect(60, 10, f.area());
     f.render_widget(Clear, area);
@@ -2329,32 +2146,6 @@ fn render_select_dialog(
     let cursor_x = inner.x;
     let cursor_y = inner.y + selected.min(items.len().saturating_sub(1)) as u16;
     f.set_cursor_position((cursor_x, cursor_y));
-}
-
-fn sample_items() -> Vec<KeyItem> {
-    vec![
-        KeyItem {
-            public_hex: "0333595220a5f1321385b8eac8c700b5ed35ca9efe73fddf3ea1488a0f19b773".to_string(),
-            tenant: "cetin".to_string(),
-            status: "active".to_string(),
-            note: "db access".to_string(),
-            tags: vec!["db".to_string()],
-        },
-        KeyItem {
-            public_hex: "f5f657822c9a9dab5b214fa08c7ee2fe0d34f4e581d98f8b8a409b3ee06518a5".to_string(),
-            tenant: "o2".to_string(),
-            status: "active".to_string(),
-            note: "app deploy".to_string(),
-            tags: vec!["deploy".to_string()],
-        },
-        KeyItem {
-            public_hex: "6081b6dd62270efe1dcc305d1bb7dd4993f5fbd8cce354067a4b9c3a96774d43".to_string(),
-            tenant: "cez".to_string(),
-            status: "deprecated".to_string(),
-            note: "legacy".to_string(),
-            tags: Vec::new(),
-        },
-    ]
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {

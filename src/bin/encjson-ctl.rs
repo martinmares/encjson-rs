@@ -66,15 +66,14 @@ fn main() -> Result<()> {
                 .vault_url
                 .clone()
                 .or_else(|| env::var("ENCJSON_VAULT_URL").ok());
-            if let Some(vault_url) = vault_url {
-                let (session, server_name) =
-                    run_async(oidc_session::ensure_valid_session(APP_NAME))?;
-                oidc_session::save_session(APP_NAME, &server_name, session.clone())?;
-                tui_ctl::run_ctl_ui_with_remote(vault_url, session.access_token)
-                    .map_err(|err| anyhow!(err.to_string()))?;
-            } else {
-                tui_ctl::run_ctl_ui().map_err(|err| anyhow!(err.to_string()))?;
-            }
+            let Some(vault_url) = vault_url else {
+                bail!("Missing vault URL (use --vault-url or set ENCJSON_VAULT_URL)");
+            };
+            let (session, server_name) =
+                run_async(oidc_session::ensure_valid_session(APP_NAME))?;
+            oidc_session::save_session(APP_NAME, &server_name, session.clone())?;
+            tui_ctl::run_ctl_ui_with_remote(vault_url, session.access_token)
+                .map_err(|err| anyhow!(err.to_string()))?;
         }
         Commands::Login {
             url,
