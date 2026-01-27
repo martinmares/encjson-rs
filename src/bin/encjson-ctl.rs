@@ -15,6 +15,8 @@ const APP_NAME: &str = "encjson-ctl";
 struct Cli {
     #[arg(long, global = true)]
     insecure: Option<bool>,
+    #[arg(long, global = true)]
+    vault_url: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -56,13 +58,17 @@ enum SessionsCommand {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Commands::Tui => {
-            if let Ok(vault_url) = env::var("ENCJSON_VAULT_URL") {
-                let (session, server_name) = oidc_session::ensure_valid_session(APP_NAME).await?;
+            let vault_url = cli
+                .vault_url
+                .clone()
+                .or_else(|| env::var("ENCJSON_VAULT_URL").ok());
+            if let Some(vault_url) = vault_url {
+                let (session, server_name) =
+                    run_async(oidc_session::ensure_valid_session(APP_NAME))?;
                 oidc_session::save_session(APP_NAME, &server_name, session.clone())?;
                 tui_ctl::run_ctl_ui_with_remote(vault_url, session.access_token)
                     .map_err(|err| anyhow!(err.to_string()))?;
@@ -76,15 +82,14 @@ async fn main() -> Result<()> {
             port,
             server,
         } => {
-            oidc_session::handle_login(
+            run_async(oidc_session::handle_login(
                 APP_NAME,
                 url,
                 client,
                 *port,
                 server,
                 cli.insecure.unwrap_or(false),
-            )
-            .await?;
+            ))?;
         }
         Commands::Logout { server, all } => {
             if *all {
@@ -101,6 +106,14 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_async<F, T>(future: F) -> Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(future)
 }
 
 fn handle_sessions(command: &SessionsCommand) -> Result<()> {

@@ -16,7 +16,7 @@ use std::sync::Once;
 use crate::crypto::{SecureBox, generate_key_pair};
 use crate::error::Error;
 use crate::json_utils::{TransformMode, dotenv_exports, env_exports, transform_json};
-use crate::key_store::{list_public_keys, load_private_key, save_private_key};
+use crate::key_store::{default_key_dir, list_public_keys, load_private_key, save_private_key};
 use crate::tui_edit::run_edit_ui;
 
 type Result<T> = std::result::Result<T, Error>;
@@ -55,6 +55,14 @@ enum Commands {
     Init {
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
         #[arg(short, long)]
+        keydir: Option<PathBuf>,
+    },
+
+    /// List local public keys
+    #[command(alias = "ls")]
+    List {
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
+        #[arg(short = 'k', long)]
         keydir: Option<PathBuf>,
     },
 
@@ -184,6 +192,29 @@ enum Commands {
         keydir: Option<PathBuf>,
     },
 
+    /// Sync private keys from the vault into the local key directory
+    Sync {
+        /// Input file (reads _public_key)
+        #[arg(short, long, conflicts_with = "key")]
+        file: Option<PathBuf>,
+
+        /// Public key to sync explicitly
+        #[arg(long, conflicts_with = "file")]
+        key: Option<String>,
+
+        /// Vault URL (overrides ENCJSON_VAULT_URL)
+        #[arg(long)]
+        vault_url: Option<String>,
+
+        /// Access token (overrides ENCJSON_ACCESS_TOKEN)
+        #[arg(long)]
+        token: Option<String>,
+
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
+        #[arg(short = 'k', long)]
+        keydir: Option<PathBuf>,
+    },
+
     Login {
         #[arg(long, required = true)]
         url: String,
@@ -237,6 +268,7 @@ fn main() {
 fn run(command: Commands, insecure: bool) -> Result<()> {
     match command {
         Commands::Init { keydir } => cmd_init(keydir),
+        Commands::List { keydir } => cmd_list(keydir),
         Commands::Encrypt {
             file,
             input,
@@ -272,6 +304,13 @@ fn run(command: Commands, insecure: bool) -> Result<()> {
             tag,
             keydir,
         } => cmd_register(public_hex, vault_url, token, tenant, note, tag, keydir),
+        Commands::Sync {
+            file,
+            key,
+            vault_url,
+            token,
+            keydir,
+        } => cmd_sync(file, key, vault_url, token, keydir),
         Commands::Login {
             url,
             client,
@@ -385,9 +424,16 @@ struct VaultRequest {
 #[derive(serde::Serialize)]
 struct RegisterPayload {
     public_hex: String,
+    private_hex: String,
     tenant: String,
     note: String,
     tags: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct VaultPrivateKey {
+    public_hex: String,
+    private_hex: String,
 }
 
 fn cmd_register(
@@ -410,8 +456,10 @@ fn cmd_register(
     if let Some(public_hex) = public_hex {
         let tenant = tenant.ok_or(Error::RegisterMissingFields)?;
         let note = note.ok_or(Error::RegisterMissingFields)?;
+        let private_hex = load_private_key(&public_hex, keydir.as_deref())?;
         send_register_request(&vault_url, &token, RegisterPayload {
             public_hex,
+            private_hex,
             tenant,
             note,
             tags,
@@ -456,8 +504,10 @@ fn cmd_register(
             .filter(|t| !t.is_empty())
             .map(|t| t.to_string())
             .collect::<Vec<_>>();
+        let private_hex = load_private_key(&key, keydir.as_deref())?;
         send_register_request(&vault_url, &token, RegisterPayload {
             public_hex: key,
+            private_hex,
             tenant,
             note,
             tags,
@@ -465,6 +515,18 @@ fn cmd_register(
         println!("Submitted.");
     }
 
+    Ok(())
+}
+
+fn cmd_list(keydir: Option<PathBuf>) -> Result<()> {
+    let keys = list_public_keys(keydir.as_deref())?;
+    if keys.is_empty() {
+        println!("No keys found.");
+        return Ok(());
+    }
+    for key in keys {
+        println!("{key}");
+    }
     Ok(())
 }
 
@@ -536,6 +598,88 @@ fn send_register_request(vault_url: &str, token: &str, payload: RegisterPayload)
     }
     Ok(())
 }
+
+fn fetch_private_key(vault_url: &str, token: &str, public_hex: &str) -> Result<VaultPrivateKey> {
+    let url = format!(
+        "{}/v1/keys/{}/private",
+        vault_url.trim_end_matches('/'),
+        public_hex
+    );
+    let response = reqwest::blocking::Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    if !status.is_success() {
+        return Err(Error::Http(body.trim().to_string()));
+    }
+    serde_json::from_str(&body).map_err(Error::Json)
+}
+
+fn cmd_sync(
+    file: Option<PathBuf>,
+    key: Option<String>,
+    vault_url: Option<String>,
+    token: Option<String>,
+    keydir: Option<PathBuf>,
+) -> Result<()> {
+    let vault_url = vault_url
+        .or_else(|| std::env::var("ENCJSON_VAULT_URL").ok())
+        .ok_or(Error::MissingVaultUrl)?;
+    let token = token
+        .or_else(|| std::env::var("ENCJSON_ACCESS_TOKEN").ok())
+        .or_else(load_token_from_session)
+        .ok_or(Error::MissingAccessToken)?;
+
+    let mut public_keys: Vec<String> = if let Some(public_hex) = key {
+        vec![public_hex]
+    } else if let Some(path) = file.as_ref() {
+        let json = read_json(Some(path))?;
+        vec![extract_public_key(&json)?.to_string()]
+    } else {
+        fetch_remote_keys(&vault_url, &token)?
+            .into_iter()
+            .map(|k| k.public_hex)
+            .collect()
+    };
+
+    if public_keys.is_empty() {
+        println!("No keys to sync.");
+        return Ok(());
+    }
+
+    public_keys.sort();
+    public_keys.dedup();
+
+    let mut downloaded = 0;
+    let mut skipped = 0;
+    for public_hex in public_keys {
+        let private_key = fetch_private_key(&vault_url, &token, &public_hex)?;
+        if private_key.public_hex != public_hex {
+            return Err(Error::Http(format!(
+                "vault returned mismatched key {}",
+                private_key.public_hex
+            )));
+        }
+        let dir = keydir.clone().unwrap_or_else(default_key_dir);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(&public_hex);
+        if path.exists() {
+            skipped += 1;
+            continue;
+        }
+        save_private_key(&public_hex, &private_key.private_hex, Some(&dir))?;
+        downloaded += 1;
+    }
+
+    println!("Sync OK. Downloaded: {downloaded}, Skipped: {skipped}");
+    Ok(())
+}
+
 
 fn cmd_init(keydir: Option<PathBuf>) -> Result<()> {
     let (priv_hex, pub_hex) = generate_key_pair();
