@@ -145,6 +145,7 @@
 - KLIENT‑CLI nikdy nepíše přímo do tenantu.
 - Vytvoří **request**:
   - `public_hex`
+  - `private_hex`
   - `tenant` (návrh)
   - `note` (povinné)
   - `tags` (návrh)
@@ -161,7 +162,7 @@
 - `POST /v1/requests`  
   Body:
   ```json
-  {"public_hex":"...","tenant":"cetin","note":"...","tags":["..."]}
+  {"public_hex":"...","private_hex":"...","tenant":"cetin","note":"...","tags":["..."]}
   ```
 - `GET /v1/requests?status=pending`
 - `POST /v1/requests/{id}/approve`  
