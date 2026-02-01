@@ -2,11 +2,11 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use openidconnect::{
     core::{CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreProviderMetadata},
-    reqwest::async_http_client,
     AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce, OAuth2TokenResponse,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
 };
 use base64::Engine as _;
+use openidconnect::reqwest as oidc_reqwest;
 use openidconnect::TokenResponse as OidcTokenResponseTrait;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -130,7 +130,12 @@ pub async fn handle_login(
     server_name: &str,
     insecure: bool,
 ) -> Result<()> {
-    let provider_metadata = discover_provider(base_url, insecure)
+    let http_client = oidc_reqwest::ClientBuilder::new()
+        .redirect(oidc_reqwest::redirect::Policy::none())
+        .build()
+        .context("Failed to create HTTP client for OIDC requests")?;
+
+    let provider_metadata = discover_provider(base_url, insecure, &http_client)
         .await
         .context("Failed to discover OIDC provider metadata")?;
 
@@ -206,69 +211,21 @@ pub async fn handle_login(
         bail!("State mismatch in OAuth2 callback");
     }
 
-    exchange_code_for_tokens(
-        app_name,
-        &client,
-        base_url,
-        &code,
-        &code_verifier,
-        insecure,
-        server_name,
-        nonce,
-    )
-    .await
-}
-
-async fn discover_provider(base_url: &str, insecure: bool) -> Result<CoreProviderMetadata> {
-    let issuer_url = IssuerUrl::new(base_url.to_string()).context("Invalid issuer URL")?;
-    if insecure {
-        eprintln!("Warning: --insecure is not supported for OIDC discovery; proceeding with default TLS validation.");
-    }
-    let metadata = CoreProviderMetadata::discover_async(issuer_url, async_http_client).await?;
-    Ok(metadata)
-}
-
-fn generate_pkce_pair() -> (String, String) {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-    use sha2::{Digest, Sha256};
-
-    let code_verifier: String = rand::rng()
-        .sample_iter(rand::distr::Alphanumeric)
-        .take(64)
-        .map(char::from)
-        .collect();
-
-    let hash = Sha256::digest(code_verifier.as_bytes());
-    let code_challenge = URL_SAFE_NO_PAD.encode(hash);
-
-    (code_verifier, code_challenge)
-}
-
-async fn exchange_code_for_tokens(
-    app_name: &str,
-    client: &CoreClient,
-    base_url: &str,
-    code: &str,
-    code_verifier: &str,
-    insecure: bool,
-    server_name: &str,
-    nonce: Nonce,
-) -> Result<()> {
-    if insecure {
-        eprintln!("Warning: --insecure is not supported for OIDC token exchange; proceeding with default TLS validation.");
-    }
-
-    let token_response = client
+    let token_request = client
         .exchange_code(AuthorizationCode::new(code.to_string()))
+        .context("Failed to prepare token request; token endpoint missing")?;
+
+    let token_response = token_request
         .set_pkce_verifier(PkceCodeVerifier::new(code_verifier.to_string()))
-        .request_async(async_http_client)
+        .request_async(&http_client)
         .await
         .context("Failed to exchange authorization code for tokens")?;
 
     let id_token = token_response.id_token().context("No ID token in response")?;
 
     let claims = id_token
-        .claims(&client.id_token_verifier(), move |nonce_opt: Option<&Nonce>| match nonce_opt {
+        .claims(&client.id_token_verifier(), move |nonce_opt: Option<&Nonce>| match nonce_opt
+        {
             Some(value) if value.secret() == nonce.secret() => Ok(()),
             Some(_) => Err("Nonce mismatch".to_string()),
             None => Err("No nonce in token".to_string()),
@@ -318,6 +275,35 @@ async fn exchange_code_for_tokens(
     println!("Server: {}", server_name);
 
     Ok(())
+}
+
+async fn discover_provider(
+    base_url: &str,
+    insecure: bool,
+    http_client: &oidc_reqwest::Client,
+) -> Result<CoreProviderMetadata> {
+    let issuer_url = IssuerUrl::new(base_url.to_string()).context("Invalid issuer URL")?;
+    if insecure {
+        eprintln!("Warning: --insecure is not supported for OIDC discovery; proceeding with default TLS validation.");
+    }
+    let metadata = CoreProviderMetadata::discover_async(issuer_url, http_client).await?;
+    Ok(metadata)
+}
+
+fn generate_pkce_pair() -> (String, String) {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    let code_verifier: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect();
+
+    let hash = Sha256::digest(code_verifier.as_bytes());
+    let code_challenge = URL_SAFE_NO_PAD.encode(hash);
+
+    (code_verifier, code_challenge)
 }
 
 #[allow(dead_code)]
