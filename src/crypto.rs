@@ -4,8 +4,7 @@ use blake2::{Blake2b512, Digest};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use lazy_static::lazy_static;
-use rand::rand_core::TryRngCore;
-use rand::rngs::OsRng;
+use rand::Rng;
 use regex::Regex;
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -111,9 +110,8 @@ impl SecureBox {
 
         // random 24-byte nonce
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        OsRng
-            .try_fill_bytes(&mut nonce_bytes)
-            .expect("OS RNG failed");
+        let mut rng = rand::rng();
+        rng.fill_bytes(&mut nonce_bytes);
 
         let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
             .map_err(|_| CryptoError::Invalid("invalid key length".into()))?;
@@ -189,10 +187,9 @@ pub fn generate_key_pair() -> (String, String) {
     let mut priv_bytes = [0u8; KEY_LEN];
     let mut pub_bytes = [0u8; KEY_LEN];
 
-    OsRng
-        .try_fill_bytes(&mut priv_bytes)
-        .expect("OS RNG failed");
-    OsRng.try_fill_bytes(&mut pub_bytes).expect("OS RNG failed");
+    let mut rng = rand::rng();
+    rng.fill_bytes(&mut priv_bytes);
+    rng.fill_bytes(&mut pub_bytes);
 
     let priv_hex = hex::encode(priv_bytes);
     let pub_hex = hex::encode(pub_bytes);

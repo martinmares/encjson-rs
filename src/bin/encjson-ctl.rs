@@ -11,12 +11,12 @@ mod tui_ctl;
 const APP_NAME: &str = "encjson-ctl";
 
 #[derive(Parser, Debug)]
-#[command(name = "encjson-ctl", version, about = "Admin TUI for encjson-vault-server")]
+#[command(name = "encjson-ctl", version, about = "Admin TUI for encjson-keys-server")]
 struct Cli {
     #[arg(long, global = true)]
     insecure: Option<bool>,
-    #[arg(long, global = true)]
-    vault_url: Option<String>,
+    #[arg(long, global = true, alias = "vault-url")]
+    keys_url: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -62,17 +62,18 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Commands::Tui => {
-            let vault_url = cli
-                .vault_url
+            let keys_url = cli
+                .keys_url
                 .clone()
+                .or_else(|| env::var("ENCJSON_KEYS_URL").ok())
                 .or_else(|| env::var("ENCJSON_VAULT_URL").ok());
-            let Some(vault_url) = vault_url else {
-                bail!("Missing vault URL (use --vault-url or set ENCJSON_VAULT_URL)");
+            let Some(keys_url) = keys_url else {
+                bail!("Missing keys server URL (use --keys-url or set ENCJSON_KEYS_URL)");
             };
             let (session, server_name) =
                 run_async(oidc_session::ensure_valid_session(APP_NAME))?;
             oidc_session::save_session(APP_NAME, &server_name, session.clone())?;
-            tui_ctl::run_ctl_ui_with_remote(vault_url, session.access_token)
+            tui_ctl::run_ctl_ui_with_remote(keys_url, session.access_token)
                 .map_err(|err| anyhow!(err.to_string()))?;
         }
         Commands::Login {

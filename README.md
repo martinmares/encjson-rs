@@ -145,11 +145,42 @@ target/release/encjson
 docker compose up -d
 ```
 
-Then set `.env` (see `.env.example`) and run the vault server:
+Then set `.env` (see `.env.example`) and run the keys server:
 
 ```bash
 export DATABASE_URL=postgres://encjson_admin:encjson_admin@localhost:5432/encjson
-cargo run --bin encjson-vault-server
+cargo run --bin encjson-keys-server
+```
+
+Keys server requires:
+
+```bash
+export ENCRYPTION_SECRET=change-me-to-a-secure-random-secret-at-least-32-chars
+export ENCJSON_KEYS_AUTH=required
+export ENCJSON_KEYS_JWT_ISSUER=https://sso.example.com
+```
+
+Web UI (optional):
+
+```bash
+export ENCJSON_KEYS_UI_ENABLED=true
+export ENCJSON_KEYS_UI_ISSUER=https://sso.example.com
+export ENCJSON_KEYS_UI_CLIENT_ID=encjson-keys-ui
+export ENCJSON_KEYS_UI_CLIENT_SECRET=...
+export ENCJSON_KEYS_UI_BASE_URL=https://keys.example.com
+export ENCJSON_KEYS_UI_COOKIE_SECURE=true
+```
+
+Optional rate limit for private key access:
+
+```bash
+export ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE=60
+```
+
+Optional rate limit for key registration requests:
+
+```bash
+export ENCJSON_KEYS_REQUESTS_RATE_LIMIT_PER_MINUTE=30
 ```
 
 (You can copy or symlink it somewhere in `$PATH`, e.g. `/usr/local/bin/encjson`.)
@@ -214,13 +245,16 @@ Typical output:
 Generated key pair (hex):
  => 🍺 public:  91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640
  => 🔑 private: 24e55b25c598d4df78387de983b455144e197e3e63239d0c1fc92f862bbd7c0c
- => 💾 saved to: /home/user/.encjson/91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640
+ => 💾 saved to: /home/user/.config/encjson/91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640
 ```
 
 By default, the private key is saved to:
 
 - `$ENCJSON_KEYDIR/<public_hex>` if `ENCJSON_KEYDIR` is set, or
-- `~/.encjson/<public_hex>` otherwise.
+- a **dirs-based OS config directory** otherwise:
+  - macOS: `~/Library/Application Support/encjson/<public_hex>`
+  - Linux: `~/.config/encjson/<public_hex>`
+  - Windows: `%APPDATA%\\encjson\\<public_hex>` (or user profile fallback)
 
 You can override the directory:
 
@@ -498,10 +532,14 @@ Up/Down select | Shift+Up/Down move | e edit | / filter | a add | r rename | d d
 The tool finds the private key in this order:
 
 1. If `ENCJSON_PRIVATE_KEY` is set and non-empty, it is used directly as a 64-hex string.
-2. Otherwise it looks up a file named `<public_hex>` in:
+2. If `ENCJSON_KEYS_URL` (or legacy `ENCJSON_VAULT_URL`) is set **and** `ENCJSON_ACCESS_TOKEN` is present, it fetches the key remotely.
+3. Otherwise it looks up a file named `<public_hex>` in:
    - the `-k/--keydir` CLI argument (if provided), or
    - `$ENCJSON_KEYDIR` (if set), or
-   - `~/.encjson`.
+   - the dirs-based config directory:
+     - macOS: `~/Library/Application Support/encjson`
+     - Linux: `~/.config/encjson`
+     - Windows: `%APPDATA%\\encjson`
 
 If no key can be found, the command fails with a clear error.
 
@@ -544,23 +582,23 @@ This makes the output more predictable in logs and on terminals with limited fon
 The default key directory is determined as follows:
 
 1. If `ENCJSON_KEYDIR` is set, it is always used (on all platforms).
-2. Otherwise:
-   - On Unix-like systems:
-     - `~/.encjson` (based on `$HOME`).
-   - On Windows:
-     - If `HOME` is set (e.g. Git Bash / MSYS), use `%HOME%\.encjson`.
-     - Else, if `USERPROFILE` is set, use `%USERPROFILE%\.encjson`
-       (typical case: `C:\Users\<name>\.encjson`).
-     - Else, if both `HOMEDRIVE` and `HOMEPATH` are set, use `%HOMEDRIVE%%HOMEPATH%\.encjson`.
-     - As a last-resort fallback, `.\.encjson` in the current working directory.
+2. Otherwise use OS config directory (via `dirs` crate):
+   - macOS: `~/Library/Application Support/encjson`
+   - Linux: `~/.config/encjson`
+   - Windows: `%APPDATA%\\encjson` (or user profile fallback)
 
 In practice, on a “normal” Windows 10/11 installation, the default ends up under the user’s profile directory, e.g.:
 
 ```text
-C:\Users\YourName\.encjson
+C:\Users\YourName\AppData\Roaming\encjson
 ```
 
 If you want complete control (for example, to share a key directory between WSL, Git Bash and native Windows binaries), set `ENCJSON_KEYDIR` explicitly on that machine.
+
+### Migration from legacy `~/.encjson`
+
+On startup, if `~/.encjson` exists and the new dirs-based directory does not,
+keys are migrated automatically (only files with hex names).
 
 ## Migration from the Crystal version
 
@@ -610,4 +648,3 @@ AGPLv3 License - see [LICENSE](LICENSE) file for details
 ## Author
 
 Martin Mareš
-

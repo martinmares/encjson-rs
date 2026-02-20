@@ -1,4 +1,4 @@
--- Add private key storage for vault sync
+-- Add private key storage for keys sync
 
 alter table keys
     add column if not exists private_hex text;

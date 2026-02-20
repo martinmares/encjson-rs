@@ -1,4 +1,4 @@
--- Encjson vault server schema (v1)
+-- Encjson keys server schema (v1)
 
 create table if not exists tenants (
     id bigserial primary key,
@@ -34,4 +34,3 @@ create table if not exists requests (
 
 create index if not exists requests_status_idx on requests (status);
 create index if not exists requests_public_hex_idx on requests (public_hex);
-

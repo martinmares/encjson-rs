@@ -42,9 +42,12 @@ pub enum Error {
     #[error("Missing access token (run encjson login or set ENCJSON_ACCESS_TOKEN)")]
     MissingAccessToken,
 
-    #[error("Missing vault URL (set ENCJSON_VAULT_URL or use --vault-url)")]
-    MissingVaultUrl,
+    #[error("Missing keys server URL (set ENCJSON_KEYS_URL or use --keys-url)")]
+    MissingKeysUrl,
 
     #[error("Register requires --tenant and --note when public key is provided")]
     RegisterMissingFields,
+
+    #[error("Output file already exists: {0}")]
+    FileAlreadyExists(String),
 }

@@ -32,6 +32,7 @@ enum Mode {
     RequestFieldEdit,
     RequestTenantSelect,
     RequestReject,
+    ConfirmReencrypt,
     ConfirmExit,
 }
 
@@ -97,6 +98,7 @@ struct App {
     help_active: bool,
     read_only: bool,
     remote: Option<RemoteConfig>,
+    pending_reencrypt: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -157,8 +159,7 @@ impl App {
         if status_choices.is_empty() {
             status_choices = vec![
                 "active".to_string(),
-                "deprecated".to_string(),
-                "hidden".to_string(),
+                "revoked".to_string(),
             ];
         }
         if tenants.is_empty() {
@@ -188,6 +189,7 @@ impl App {
             help_active: false,
             read_only,
             remote: None,
+            pending_reencrypt: false,
         }
     }
 
@@ -381,6 +383,22 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                     app.mode = Mode::Edit;
                 }
             }
+            KeyCode::Char('R') if app.view == View::Keys => {
+                if app.read_only {
+                    set_status(app, "read-only");
+                    return Ok(false);
+                }
+                app.pending_reencrypt = true;
+                app.mode = Mode::ConfirmReencrypt;
+            }
+            KeyCode::Char('R') if app.view == View::Requests => {
+                if app.read_only {
+                    set_status(app, "read-only");
+                    return Ok(false);
+                }
+                app.pending_reencrypt = true;
+                app.mode = Mode::ConfirmReencrypt;
+            }
             KeyCode::Char('e') if app.view == View::Requests => {
                 if app.read_only {
                     set_status(app, "read-only");
@@ -460,6 +478,24 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
             }
             KeyCode::Char('h') => {
                 app.help_active = true;
+            }
+            _ => {}
+        },
+        Mode::ConfirmReencrypt => match key.code {
+            KeyCode::Enter => {
+                if app.pending_reencrypt {
+                    if let Err(err) = reencrypt_keys(app) {
+                        set_status_error(app, format!("reencrypt failed: {err}"));
+                    } else {
+                        app.dirty = true;
+                    }
+                }
+                app.pending_reencrypt = false;
+                app.mode = Mode::Normal;
+            }
+            KeyCode::Esc => {
+                app.pending_reencrypt = false;
+                app.mode = Mode::Normal;
             }
             _ => {}
         },
@@ -849,6 +885,7 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
         Mode::RequestFieldEdit => "help: Edit field | Enter apply | Esc cancel",
         Mode::RequestTenantSelect => "help: Select tenant | Enter apply | Esc cancel",
         Mode::RequestReject => "help: Reject reason | Enter save | Esc cancel",
+        Mode::ConfirmReencrypt => "help: Re-encrypt? Enter/Esc",
         Mode::ConfirmExit => "help: Exit? y/n/c",
     };
     let help_line = Paragraph::new(help).alignment(Alignment::Left);
@@ -858,6 +895,16 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
         let area = centered_rect(60, 3, area);
         f.render_widget(Clear, area);
         render_text_input(f, area, "Filter", "filter", app);
+    }
+
+    if app.mode == Mode::ConfirmReencrypt {
+        let area = centered_rect_fixed(56, 3, area);
+        f.render_widget(Clear, area);
+        render_confirm_dialog(
+            f,
+            " Re-encrypt keys ",
+            "This will re-encrypt all stored private keys. Continue?",
+        );
     }
 
     if app.mode == Mode::ConfirmExit {
@@ -1019,6 +1066,7 @@ fn help_lines(view: View) -> Vec<Line<'static>> {
         View::Keys => {
             lines.push(Line::from("Enter edit key"));
             lines.push(Line::from("s save (in editor)"));
+            lines.push(Line::from("R re-encrypt keys"));
         }
         View::Tenants => {
             lines.push(Line::from("n new tenant"));
@@ -1032,6 +1080,7 @@ fn help_lines(view: View) -> Vec<Line<'static>> {
             lines.push(Line::from("e edit request"));
             lines.push(Line::from("a approve request"));
             lines.push(Line::from("x reject request"));
+            lines.push(Line::from("R re-encrypt keys"));
         }
     }
 
@@ -1742,7 +1791,7 @@ fn fetch_remote_keys(base_url: &str, access_token: &str) -> Result<Vec<KeyItem>,
     let status = response.status();
     let body = response.text()?;
     if !status.is_success() {
-        return Err(format!("vault request failed ({}): {}", status, body.trim()).into());
+        return Err(format!("keys server request failed ({}): {}", status, body.trim()).into());
     }
     let items: Vec<KeyItem> = serde_json::from_str(&body)?;
     Ok(items)
@@ -1758,7 +1807,7 @@ fn fetch_remote_key(remote: &RemoteConfig, public_hex: &str) -> Result<KeyItem, 
     let status = response.status();
     let body = response.text()?;
     if !status.is_success() {
-        return Err(format!("vault request failed ({}): {}", status, body.trim()).into());
+        return Err(format!("keys server request failed ({}): {}", status, body.trim()).into());
     }
     let item: KeyItem = serde_json::from_str(&body)?;
     Ok(item)
@@ -1774,7 +1823,7 @@ fn fetch_remote_tenants(
     let status = response.status();
     let body = response.text()?;
     if !status.is_success() {
-        return Err(format!("vault request failed ({}): {}", status, body.trim()).into());
+        return Err(format!("keys server request failed ({}): {}", status, body.trim()).into());
     }
     let tenants: Vec<Value> = serde_json::from_str(&body)?;
     let names = tenants
@@ -1794,10 +1843,41 @@ fn fetch_remote_statuses(
     let status = response.status();
     let body = response.text()?;
     if !status.is_success() {
-        return Err(format!("vault request failed ({}): {}", status, body.trim()).into());
+        return Err(format!("keys server request failed ({}): {}", status, body.trim()).into());
     }
     let statuses: Vec<String> = serde_json::from_str(&body)?;
     Ok(statuses)
+}
+
+#[derive(serde::Deserialize)]
+struct ReencryptResult {
+    keys_updated: i64,
+    requests_updated: i64,
+}
+
+fn reencrypt_keys(app: &mut App) -> Result<(), Box<dyn Error>> {
+    let Some(remote) = app.remote.as_ref() else {
+        return Err("missing remote config".into());
+    };
+    let url = remote_url(&remote.base_url, "/v1/keys/reencrypt");
+    let response = reqwest::blocking::Client::new()
+        .post(url)
+        .bearer_auth(&remote.access_token)
+        .send()?;
+    let status = response.status();
+    let body = response.text()?;
+    if !status.is_success() {
+        return Err(format!("reencrypt failed ({}): {}", status, body.trim()).into());
+    }
+    let result: ReencryptResult = serde_json::from_str(&body)?;
+    set_status(
+        app,
+        format!(
+            "reencrypt ok: keys {} requests {}",
+            result.keys_updated, result.requests_updated
+        ),
+    );
+    Ok(())
 }
 
 fn fetch_remote_requests(
@@ -1810,7 +1890,7 @@ fn fetch_remote_requests(
     let status = response.status();
     let body = response.text()?;
     if !status.is_success() {
-        return Err(format!("vault request failed ({}): {}", status, body.trim()).into());
+        return Err(format!("keys server request failed ({}): {}", status, body.trim()).into());
     }
     let items: Vec<RequestItem> = serde_json::from_str(&body)?;
     Ok(items)
@@ -1963,7 +2043,7 @@ fn update_remote_key(
     let status = response.status();
     let text = response.text()?;
     if !status.is_success() {
-        return Err(format!("vault update failed ({}): {}", status, text.trim()).into());
+        return Err(format!("keys server update failed ({}): {}", status, text.trim()).into());
     }
     let updated: KeyItem = serde_json::from_str(&text)?;
     Ok(updated)
@@ -2146,6 +2226,20 @@ fn render_select_dialog(
     let cursor_x = inner.x;
     let cursor_y = inner.y + selected.min(items.len().saturating_sub(1)) as u16;
     f.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn render_confirm_dialog(f: &mut ratatui::Frame<'_>, title: &str, message: &str) {
+    let area = centered_rect_fixed(56, 3, f.area());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(Style::default().fg(Color::Yellow))
+        .padding(Padding::horizontal(1));
+    let paragraph = Paragraph::new(message)
+        .block(block)
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Yellow));
+    f.render_widget(paragraph, area);
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {

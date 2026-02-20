@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use dirs::data_dir;
 
 use crate::error::Error;
+use reqwest::blocking::Client;
 
 #[cfg(not(windows))]
 fn home_dir() -> Option<PathBuf> {
@@ -63,6 +64,10 @@ pub fn load_private_key(public_hex: &str, key_dir: Option<&Path>) -> Result<Stri
         }
     }
 
+    if let Some(remote_key) = fetch_remote_private_key(public_hex) {
+        return Ok(remote_key);
+    }
+
     let dir = key_dir.map(PathBuf::from).unwrap_or_else(default_key_dir);
 
     let path = dir.join(public_hex);
@@ -74,6 +79,33 @@ pub fn load_private_key(public_hex: &str, key_dir: Option<&Path>) -> Result<Stri
         }
         Err(e) => Err(Error::Io(e)),
     }
+}
+
+fn fetch_remote_private_key(public_hex: &str) -> Option<String> {
+    let url = env::var("ENCJSON_KEYS_URL")
+        .or_else(|_| env::var("ENCJSON_VAULT_URL"))
+        .ok()?;
+    let token = env::var("ENCJSON_ACCESS_TOKEN").ok()?;
+    if url.trim().is_empty() || token.trim().is_empty() {
+        return None;
+    }
+    let url = format!(
+        "{}/v1/keys/{}/private",
+        url.trim_end_matches('/'),
+        public_hex
+    );
+    let resp = Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().ok()?;
+    body.get("private_hex")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Uloží private key do souboru `<key_dir>/<public_hex>`.

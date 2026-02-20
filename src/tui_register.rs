@@ -67,7 +67,7 @@ impl App {
 pub fn run_register_tui(
     keys: Vec<String>,
     tenants: Vec<String>,
-    vault_url: String,
+    keys_url: String,
     token: String,
     keydir: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
@@ -78,7 +78,7 @@ pub fn run_register_tui(
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(keys, tenants);
-    let res = run_app(&mut terminal, &mut app, &vault_url, &token, keydir.as_deref());
+    let res = run_app(&mut terminal, &mut app, &keys_url, &token, keydir.as_deref());
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -90,7 +90,7 @@ pub fn run_register_tui(
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    vault_url: &str,
+    keys_url: &str,
     token: &str,
     keydir: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn Error>> {
@@ -104,7 +104,7 @@ fn run_app(
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    if handle_key(app, key, vault_url, token, keydir)? {
+                    if handle_key(app, key, keys_url, token, keydir)? {
                         break;
                     }
                 }
@@ -129,7 +129,7 @@ fn run_app(
 fn handle_key(
     app: &mut App,
     key: KeyEvent,
-    vault_url: &str,
+    keys_url: &str,
     token: &str,
     keydir: Option<&std::path::Path>,
 ) -> Result<bool, Box<dyn Error>> {
@@ -210,7 +210,7 @@ fn handle_key(
                     let key = app.keys[app.selected].clone();
                     let private_hex = load_private_key(&key, keydir)?;
                     send_register_request(
-                        vault_url,
+                        keys_url,
                         token,
                         RegisterPayload {
                             public_hex: key,

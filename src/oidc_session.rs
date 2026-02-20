@@ -8,7 +8,7 @@ use openidconnect::{
 use base64::Engine as _;
 use openidconnect::reqwest as oidc_reqwest;
 use openidconnect::TokenResponse as OidcTokenResponseTrait;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
