@@ -22,9 +22,9 @@ use time::format_description::parse;
 use time::{OffsetDateTime, UtcOffset};
 use unicode_width::UnicodeWidthChar;
 
-use crate::crypto::SecureBox;
-use crate::error::Error;
-use crate::key_store::load_private_key;
+use encjson_core::crypto::SecureBox;
+use encjson_core::error::Error;
+use encjson_core::key_store::load_private_key;
 
 #[derive(Debug)]
 struct Entry {
@@ -104,7 +104,7 @@ pub fn run_edit_ui(path: &Path, keydir: Option<PathBuf>) -> Result<(), Error> {
 
     let sb = match crate::extract_public_key(&root) {
         Ok(public_key_hex) => {
-            let private_key_hex = load_private_key(public_key_hex, keydir.as_deref())?;
+            let private_key_hex = load_private_key(public_key_hex, keydir.as_deref(), None)?;
             Some(SecureBox::new_from_hex(&private_key_hex, public_key_hex)?)
         }
         Err(Error::MissingPublicKey) => None,
@@ -436,8 +436,8 @@ fn handle_rename_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
     match key.code {
         KeyCode::Enter => {
             let trimmed = app.input.trim();
-            if !trimmed.is_empty() {
-                if let Some(index) = app.pending_rename.take() {
+            if !trimmed.is_empty()
+                && let Some(index) = app.pending_rename.take() {
                     let candidate = trimmed.to_uppercase();
                     if !is_valid_env_key(&candidate) {
                         app.pending_rename = Some(index);
@@ -458,7 +458,6 @@ fn handle_rename_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
                         app.selected = 0;
                     }
                 }
-            }
             app.mode = Mode::Normal;
         }
         KeyCode::Esc => {
@@ -1077,7 +1076,7 @@ fn wrap_text_lines(text: &str, width: usize) -> Vec<String> {
 }
 
 fn lines_to_widget(lines: Vec<String>) -> Vec<Line<'static>> {
-    lines.into_iter().map(|line| Line::from(line)).collect()
+    lines.into_iter().map(Line::from).collect()
 }
 
 fn selected_entry(app: &App) -> Option<&Entry> {
@@ -1353,9 +1352,5 @@ fn preview_scroll_offset(input: &str, cursor: usize, height: usize) -> usize {
     }
     let byte_index = cursor_byte_index(input, cursor);
     let line_index = byte_index / 16;
-    if line_index + 1 > height {
-        line_index + 1 - height
-    } else {
-        0
-    }
+    (line_index + 1).saturating_sub(height)
 }

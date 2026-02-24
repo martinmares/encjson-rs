@@ -57,12 +57,19 @@ pub fn default_key_dir() -> PathBuf {
 /// Načte private key pro daný public key.
 /// - pokud je nastaven ENCJSON_PRIVATE_KEY, použije ho
 /// - jinak hledá soubor `<key_dir>/<public_hex>`
-pub fn load_private_key(public_hex: &str, key_dir: Option<&Path>) -> Result<String, Error> {
-    if let Ok(pk) = env::var("ENCJSON_PRIVATE_KEY") {
-        if !pk.trim().is_empty() {
+pub fn load_private_key(
+    public_hex: &str,
+    key_dir: Option<&Path>,
+    private_key_override: Option<&str>,
+) -> Result<String, Error> {
+    if let Some(pk) = private_key_override
+        && !pk.trim().is_empty() {
             return Ok(pk.trim().to_owned());
         }
-    }
+    if let Ok(pk) = env::var("ENCJSON_PRIVATE_KEY")
+        && !pk.trim().is_empty() {
+            return Ok(pk.trim().to_owned());
+        }
 
     if let Some(remote_key) = fetch_remote_private_key(public_hex) {
         return Ok(remote_key);
@@ -83,14 +90,13 @@ pub fn load_private_key(public_hex: &str, key_dir: Option<&Path>) -> Result<Stri
 
 fn fetch_remote_private_key(public_hex: &str) -> Option<String> {
     let url = env::var("ENCJSON_KEYS_URL")
-        .or_else(|_| env::var("ENCJSON_VAULT_URL"))
         .ok()?;
     let token = env::var("ENCJSON_ACCESS_TOKEN").ok()?;
     if url.trim().is_empty() || token.trim().is_empty() {
         return None;
     }
     let url = format!(
-        "{}/v1/keys/{}/private",
+        "{}/api/v1/keys/{}/private",
         url.trim_end_matches('/'),
         public_hex
     );
@@ -251,7 +257,7 @@ mod tests {
             env::remove_var("ENCJSON_PRIVATE_KEY");
         }
 
-        let loaded = load_private_key(public_hex, Some(cli_dir.as_path())).unwrap();
+        let loaded = load_private_key(public_hex, Some(cli_dir.as_path()), None).unwrap();
         assert_eq!(loaded, "cli-private");
 
         restore_env_var("ENCJSON_KEYDIR", prev_keydir);
@@ -276,7 +282,7 @@ mod tests {
             env::remove_var("ENCJSON_PRIVATE_KEY");
         }
 
-        let loaded = load_private_key(public_hex, None).unwrap();
+        let loaded = load_private_key(public_hex, None, None).unwrap();
         assert_eq!(loaded, "env-private");
 
         restore_env_var("ENCJSON_KEYDIR", prev_keydir);

@@ -101,25 +101,21 @@ fn run_app(
         terminal.draw(|f| render(f, app))?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
-        if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if handle_key(app, key, keys_url, token, keydir)? {
+        if event::poll(timeout)?
+            && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+                    && handle_key(app, key, keys_url, token, keydir)? {
                         break;
                     }
-                }
-            }
-        }
 
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
-            if let Some(until) = app.status_until {
-                if Instant::now() > until {
+            if let Some(until) = app.status_until
+                && Instant::now() > until {
                     app.status = "ready".to_string();
                     app.status_error = false;
                     app.status_until = None;
                 }
-            }
         }
     }
 
@@ -208,7 +204,7 @@ fn handle_key(
                         return Ok(false);
                     }
                     let key = app.keys[app.selected].clone();
-                    let private_hex = load_private_key(&key, keydir)?;
+                    let private_hex = load_private_key(&key, keydir, None)?;
                     send_register_request(
                         keys_url,
                         token,
@@ -248,11 +244,10 @@ fn handle_key(
                 }
             }
             KeyCode::Enter => {
-                if let Some(draft) = app.draft.as_mut() {
-                    if let Some(value) = app.tenants.get(app.edit_field) {
+                if let Some(draft) = app.draft.as_mut()
+                    && let Some(value) = app.tenants.get(app.edit_field) {
                         draft.tenant = value.clone();
                     }
-                }
                 app.edit_field = 0;
                 app.mode = Mode::Edit;
             }
@@ -587,11 +582,7 @@ fn list_offset(selected: usize, height: usize) -> usize {
     if height == 0 {
         return 0;
     }
-    if selected + 1 > height {
-        selected + 1 - height
-    } else {
-        0
-    }
+    (selected + 1).saturating_sub(height)
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {

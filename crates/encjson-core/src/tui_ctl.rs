@@ -274,15 +274,12 @@ fn run_app_with(
         terminal.draw(|f| render_ui(f, app))?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
-        if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if handle_key(app, key)? {
+        if event::poll(timeout)?
+            && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+                    && handle_key(app, key)? {
                         return Ok(());
                     }
-                }
-            }
-        }
 
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
@@ -340,14 +337,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                     set_status(app, "read-only");
                     return Ok(false);
                 }
-                if let Some(remote) = &app.remote {
-                    if let Some(item) = selected_item(app) {
+                if let Some(remote) = &app.remote
+                    && let Some(item) = selected_item(app) {
                         match fetch_remote_key(remote, &item.public_hex) {
                             Ok(updated) => update_item(app, updated),
                             Err(err) => set_status_error(app, format!("detail fetch failed: {err}")),
                         }
                     }
-                }
                 if let Some(item) = selected_item(app) {
                     app.draft = Some(KeyDraft {
                         tenant: item.tenant.clone(),
@@ -364,14 +360,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                     set_status(app, "read-only");
                     return Ok(false);
                 }
-                if let Some(remote) = &app.remote {
-                    if let Some(item) = selected_item(app) {
+                if let Some(remote) = &app.remote
+                    && let Some(item) = selected_item(app) {
                         match fetch_remote_key(remote, &item.public_hex) {
                             Ok(updated) => update_item(app, updated),
                             Err(err) => set_status_error(app, format!("detail fetch failed: {err}")),
                         }
                     }
-                }
                 if let Some(item) = selected_item(app) {
                     app.draft = Some(KeyDraft {
                         tenant: item.tenant.clone(),
@@ -594,11 +589,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                 }
             }
             KeyCode::Enter => {
-                if let Some(draft) = app.draft.as_mut() {
-                    if let Some(value) = app.tenant_choices.get(app.edit_field) {
+                if let Some(draft) = app.draft.as_mut()
+                    && let Some(value) = app.tenant_choices.get(app.edit_field) {
                         draft.tenant = value.clone();
                     }
-                }
                 app.edit_field = 0;
                 app.mode = Mode::Edit;
             }
@@ -620,11 +614,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                 }
             }
             KeyCode::Enter => {
-                if let Some(draft) = app.draft.as_mut() {
-                    if let Some(value) = app.status_choices.get(app.edit_field) {
+                if let Some(draft) = app.draft.as_mut()
+                    && let Some(value) = app.status_choices.get(app.edit_field) {
                         draft.status = value.clone();
                     }
-                }
                 app.edit_field = 1;
                 app.mode = Mode::Edit;
             }
@@ -720,11 +713,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                 }
             }
             KeyCode::Enter => {
-                if let Some(draft) = app.request_draft.as_mut() {
-                    if let Some(value) = app.tenant_choices.get(app.edit_field) {
+                if let Some(draft) = app.request_draft.as_mut()
+                    && let Some(value) = app.tenant_choices.get(app.edit_field) {
                         draft.tenant = value.clone();
                     }
-                }
                 app.edit_field = 0;
                 app.mode = Mode::RequestEdit;
             }
@@ -843,7 +835,7 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
 
     let header = Paragraph::new(render_tabs(app))
         .alignment(Alignment::Left)
-        .block(Block::default().borders(Borders::ALL).title("encjson-ctl"));
+        .block(Block::default().borders(Borders::ALL).title("encjson-keys-ctl"));
     f.render_widget(header, chunks[0]);
 
     let main_chunks = Layout::default()
@@ -965,12 +957,13 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
 }
 
 fn render_tabs(app: &App) -> Line<'static> {
-    let mut spans = Vec::new();
-    spans.push(tab_span("Keys", app.view == View::Keys, false));
-    spans.push(Span::raw("│"));
-    spans.push(tab_span("Tenants", app.view == View::Tenants, false));
-    spans.push(Span::raw("│"));
-    spans.push(tab_span("Tags", app.view == View::Tags, false));
+    let mut spans = vec![
+        tab_span("Keys", app.view == View::Keys, false),
+        Span::raw("│"),
+        tab_span("Tenants", app.view == View::Tenants, false),
+        Span::raw("│"),
+        tab_span("Tags", app.view == View::Tags, false),
+    ];
     let pending = app.requests.iter().any(|r| r.status == "pending");
     spans.push(Span::raw("│"));
     spans.push(tab_span("Requests", app.view == View::Requests, pending));
@@ -1015,11 +1008,10 @@ fn render_text_input(
 }
 
 fn current_status(app: &App) -> (String, bool) {
-    if let Some(temp) = app.status_temp.as_ref() {
-        if Instant::now() < temp.expires_at {
+    if let Some(temp) = app.status_temp.as_ref()
+        && Instant::now() < temp.expires_at {
             return (temp.message.clone(), temp.is_error);
         }
-    }
     (app.status_base.clone(), false)
 }
 
@@ -1110,11 +1102,12 @@ fn render_main_view(
             render_simple_list(
                 f,
                 app,
-                "Tenants",
-                "Details",
-                &app.tenants,
-                &indices,
-                app.selected_tenants,
+                SimpleListView {
+                    title: "Tenants",
+                    items: &app.tenants,
+                    indices: &indices,
+                    selected: app.selected_tenants,
+                },
                 chunks,
             );
         }
@@ -1123,16 +1116,24 @@ fn render_main_view(
             render_simple_list(
                 f,
                 app,
-                "Tags",
-                "Details",
-                &app.tags,
-                &indices,
-                app.selected_tags,
+                SimpleListView {
+                    title: "Tags",
+                    items: &app.tags,
+                    indices: &indices,
+                    selected: app.selected_tags,
+                },
                 chunks,
             );
         }
         View::Requests => render_requests_view(f, app, chunks),
     }
+}
+
+struct SimpleListView<'a> {
+    title: &'a str,
+    items: &'a [String],
+    indices: &'a [usize],
+    selected: usize,
 }
 
 fn render_keys_view(
@@ -1218,31 +1219,27 @@ fn render_requests_view(
 fn render_simple_list(
     f: &mut ratatui::Frame<'_>,
     app: &App,
-    title: &str,
-    details_title: &str,
-    items: &[String],
-    indices: &[usize],
-    selected: usize,
+    view: SimpleListView<'_>,
     chunks: Vec<ratatui::layout::Rect>,
 ) {
-    let list_items: Vec<ListItem> = if indices.is_empty() {
+    let list_items: Vec<ListItem> = if view.indices.is_empty() {
         vec![ListItem::new(Line::from(" no items"))]
     } else {
-        indices
+        view.indices
             .iter()
-            .map(|idx| ListItem::new(Line::from(format!(" {}", items[*idx]))))
+            .map(|idx| ListItem::new(Line::from(format!(" {}", view.items[*idx]))))
             .collect()
     };
     let mut state = ListState::default();
-    if !indices.is_empty() {
-        let selected = selected.min(indices.len().saturating_sub(1));
+    if !view.indices.is_empty() {
+        let selected = view.selected.min(view.indices.len().saturating_sub(1));
         let list_height = chunks[0].height.saturating_sub(2) as usize;
         let offset = list_offset(selected, list_height);
         state = state.with_selected(Some(selected)).with_offset(offset);
     }
     let list_block = Block::default()
         .borders(Borders::ALL)
-        .title(title);
+        .title(view.title);
     let list = List::new(list_items)
         .block(list_block)
         .highlight_symbol(">> ")
@@ -1255,7 +1252,7 @@ fn render_simple_list(
     f.render_stateful_widget(list, chunks[0], &mut state);
 
     let details = Paragraph::new(build_details(app))
-        .block(Block::default().borders(Borders::ALL).title(details_title));
+        .block(Block::default().borders(Borders::ALL).title("Details"));
     f.render_widget(details, chunks[1]);
 }
 
@@ -1449,11 +1446,7 @@ fn list_offset(selected: usize, height: usize) -> usize {
     if height == 0 {
         return 0;
     }
-    if selected + 1 > height {
-        selected + 1 - height
-    } else {
-        0
-    }
+    (selected + 1).saturating_sub(height)
 }
 
 fn format_key_label(item: &KeyItem) -> String {
@@ -1786,7 +1779,7 @@ fn remote_url(base_url: &str, path: &str) -> String {
 
 fn fetch_remote_keys(base_url: &str, access_token: &str) -> Result<Vec<KeyItem>, Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(base_url, "/v1/keys");
+    let url = remote_url(base_url, "/api/v1/keys");
     let response = client.get(url).bearer_auth(access_token).send()?;
     let status = response.status();
     let body = response.text()?;
@@ -1799,7 +1792,7 @@ fn fetch_remote_keys(base_url: &str, access_token: &str) -> Result<Vec<KeyItem>,
 
 fn fetch_remote_key(remote: &RemoteConfig, public_hex: &str) -> Result<KeyItem, Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(&remote.base_url, &format!("/v1/keys/{}", public_hex));
+    let url = remote_url(&remote.base_url, &format!("/api/v1/keys/{}", public_hex));
     let response = client
         .get(url)
         .bearer_auth(&remote.access_token)
@@ -1818,7 +1811,7 @@ fn fetch_remote_tenants(
     access_token: &str,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(base_url, "/v1/tenants");
+    let url = remote_url(base_url, "/api/v1/tenants");
     let response = client.get(url).bearer_auth(access_token).send()?;
     let status = response.status();
     let body = response.text()?;
@@ -1838,7 +1831,7 @@ fn fetch_remote_statuses(
     access_token: &str,
 ) -> Result<Vec<String>, Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(base_url, "/v1/statuses");
+    let url = remote_url(base_url, "/api/v1/statuses");
     let response = client.get(url).bearer_auth(access_token).send()?;
     let status = response.status();
     let body = response.text()?;
@@ -1859,7 +1852,7 @@ fn reencrypt_keys(app: &mut App) -> Result<(), Box<dyn Error>> {
     let Some(remote) = app.remote.as_ref() else {
         return Err("missing remote config".into());
     };
-    let url = remote_url(&remote.base_url, "/v1/keys/reencrypt");
+    let url = remote_url(&remote.base_url, "/api/v1/keys/reencrypt");
     let response = reqwest::blocking::Client::new()
         .post(url)
         .bearer_auth(&remote.access_token)
@@ -1885,7 +1878,7 @@ fn fetch_remote_requests(
     access_token: &str,
 ) -> Result<Vec<RequestItem>, Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(base_url, "/v1/requests?status=pending");
+    let url = remote_url(base_url, "/api/v1/requests?status=pending");
     let response = client.get(url).bearer_auth(access_token).send()?;
     let status = response.status();
     let body = response.text()?;
@@ -1898,7 +1891,7 @@ fn fetch_remote_requests(
 
 fn remote_create_tenant(remote: &RemoteConfig, name: &str) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(&remote.base_url, "/v1/tenants");
+    let url = remote_url(&remote.base_url, "/api/v1/tenants");
     let body = serde_json::json!({ "name": name });
     let response = client
         .post(url)
@@ -1919,7 +1912,7 @@ fn remote_rename_tenant(
     new_name: &str,
 ) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(&remote.base_url, &format!("/v1/tenants/{}", old_name));
+    let url = remote_url(&remote.base_url, &format!("/api/v1/tenants/{}", old_name));
     let body = serde_json::json!({ "name": new_name });
     let response = client
         .patch(url)
@@ -1936,7 +1929,7 @@ fn remote_rename_tenant(
 
 fn remote_delete_tenant(remote: &RemoteConfig, name: &str) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(&remote.base_url, &format!("/v1/tenants/{}", name));
+    let url = remote_url(&remote.base_url, &format!("/api/v1/tenants/{}", name));
     let response = client
         .delete(url)
         .bearer_auth(&remote.access_token)
@@ -1957,7 +1950,7 @@ fn remote_approve_request(
     tags: &[String],
 ) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(&remote.base_url, &format!("/v1/requests/{}/approve", id));
+    let url = remote_url(&remote.base_url, &format!("/api/v1/requests/{}/approve", id));
     let body = serde_json::json!({
         "tenant": tenant,
         "status": "active",
@@ -1983,7 +1976,7 @@ fn remote_reject_request(
     reason: &str,
 ) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(&remote.base_url, &format!("/v1/requests/{}/reject", id));
+    let url = remote_url(&remote.base_url, &format!("/api/v1/requests/{}/reject", id));
     let body = serde_json::json!({ "reason": reason });
     let response = client
         .post(url)
@@ -2003,7 +1996,7 @@ fn remote_update_request(
     draft: &RequestDraft,
 ) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(&remote.base_url, &format!("/v1/requests/{}", draft.id));
+    let url = remote_url(&remote.base_url, &format!("/api/v1/requests/{}", draft.id));
     let body = serde_json::json!({
         "tenant": draft.tenant,
         "note": draft.note,
@@ -2028,7 +2021,7 @@ fn update_remote_key(
     draft: &KeyDraft,
 ) -> Result<KeyItem, Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(&remote.base_url, &format!("/v1/keys/{}", public_hex));
+    let url = remote_url(&remote.base_url, &format!("/api/v1/keys/{}", public_hex));
     let body = serde_json::json!({
         "tenant": draft.tenant,
         "status": draft.status,
@@ -2148,7 +2141,7 @@ fn render_request_edit_dialog(f: &mut ratatui::Frame<'_>, app: &App) {
         lines.push(Line::from("Enter edit | s save | Esc cancel"));
         if matches!(app.mode, Mode::RequestFieldEdit) {
             let (label, line_index) = match app.edit_field {
-                0 => ("tenant", 2 + 0),
+                0 => ("tenant", 2),
                 1 => ("tags", 2 + 1),
                 _ => ("note", 2 + 2),
             };

@@ -1,13 +1,20 @@
 use std::net::SocketAddr;
+use std::{io::BufReader, sync::Arc as StdArc};
 
 use axum::{
+    Router,
     extract::{Path, Query, State, Form},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, Request},
     response::{IntoResponse, Response, Redirect},
     routing::{get, patch, post},
-    Json, Router,
+    Json,
 };
+use clap::Parser;
 use chrono::{DateTime, Utc};
+use encjson_core::key_sources::{
+    ConjurConfig, KeySourceKind, KeySourceOptions, RemoteMtlsConfig, VaultConfig, load_from_source,
+    require_policy_context,
+};
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, QueryBuilder};
@@ -25,10 +32,136 @@ use rand::Rng;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use urlencoding::encode;
 use std::fmt::Write as _;
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use rustls::RootCertStore;
+use rustls::server::WebPkiClientVerifier;
+use tokio_rustls::TlsAcceptor;
+use tower_service::Service;
+use x509_parser::extensions::GeneralName;
+use x509_parser::prelude::ParsedExtension;
+use simple_policy_engine::{
+    Decision, EngineInput, Policy, Profile, ResourceInput, ResourceScopedInput, evaluate,
+    validate_for_profile,
+};
+
+#[derive(Debug, Parser)]
+#[command(name = "encjson-keys-server", about = "Keys server for encjson")]
+struct Args {
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: Option<String>,
+    #[arg(long, env = "ENCRYPTION_SECRET")]
+    encryption_secret: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_ADDR", default_value = "127.0.0.1:8080")]
+    keys_addr: String,
+    #[arg(long, env = "ENCJSON_KEYS_AUTH")]
+    keys_auth: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_JWT_ISSUER")]
+    keys_jwt_issuer: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_JWKS_URL")]
+    keys_jwks_url: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_JWT_AUDIENCE")]
+    keys_jwt_audience: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_MTLS_MODE")]
+    keys_mtls_mode: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_POLICY_FILE")]
+    keys_policy_file: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE")]
+    keys_rate_limit_per_minute: Option<u64>,
+    #[arg(long, env = "ENCJSON_KEYS_REQUESTS_RATE_LIMIT_PER_MINUTE")]
+    keys_requests_rate_limit_per_minute: Option<u64>,
+    #[arg(long, env = "ENCJSON_KEYS_UI_ENABLED")]
+    keys_ui_enabled: Option<bool>,
+    #[arg(long, env = "ENCJSON_KEYS_UI_ISSUER")]
+    keys_ui_issuer: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_UI_CLIENT_ID")]
+    keys_ui_client_id: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_UI_CLIENT_SECRET")]
+    keys_ui_client_secret: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_UI_BASE_URL")]
+    keys_ui_base_url: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_UI_COOKIE_SECURE")]
+    keys_ui_cookie_secure: Option<bool>,
+    #[arg(long, env = "ENCJSON_KEYS_TLS_CERT_FILE")]
+    keys_tls_cert_file: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_TLS_KEY_FILE")]
+    keys_tls_key_file: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_TLS_CLIENT_CA_FILE")]
+    keys_tls_client_ca_file: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_SERVER_SCOPE_REQUIRED", default_value_t = false)]
+    keys_server_scope_required: bool,
+    #[arg(long, env = "ENCJSON_TENANT")]
+    tenant: Option<String>,
+    #[arg(long = "env", env = "ENCJSON_ENV")]
+    env_name: Option<String>,
+    #[arg(long, env = "ENCJSON_KEY_SOURCE", value_enum)]
+    key_source: Option<KeySourceCli>,
+    #[arg(long, env = "ENCJSON_REMOTE_KEYS_URL")]
+    remote_keys_url: Option<String>,
+    #[arg(long, env = "ENCJSON_REMOTE_TLS_CERT_FILE")]
+    remote_tls_cert_file: Option<String>,
+    #[arg(long, env = "ENCJSON_REMOTE_TLS_KEY_FILE")]
+    remote_tls_key_file: Option<String>,
+    #[arg(long, env = "ENCJSON_REMOTE_TLS_CA_FILE")]
+    remote_tls_ca_file: Option<String>,
+    #[arg(long, env = "ENCJSON_VAULT_ADDR")]
+    vault_addr: Option<String>,
+    #[arg(long, env = "ENCJSON_VAULT_PATH")]
+    vault_path: Option<String>,
+    #[arg(long, env = "ENCJSON_VAULT_TOKEN")]
+    vault_token: Option<String>,
+    #[arg(long, env = "ENCJSON_VAULT_PUBLIC_FIELD")]
+    vault_public_field: Option<String>,
+    #[arg(long, env = "ENCJSON_VAULT_PRIVATE_FIELD")]
+    vault_private_field: Option<String>,
+    #[arg(long, env = "ENCJSON_CONJUR_APPLIANCE_URL")]
+    conjur_appliance_url: Option<String>,
+    #[arg(long, env = "ENCJSON_CONJUR_ACCOUNT")]
+    conjur_account: Option<String>,
+    #[arg(long, env = "ENCJSON_CONJUR_AUTHN_LOGIN")]
+    conjur_authn_login: Option<String>,
+    #[arg(long, env = "ENCJSON_CONJUR_AUTHN_API_KEY")]
+    conjur_authn_api_key: Option<String>,
+    #[arg(long, env = "ENCJSON_CONJUR_PUBLIC_VARIABLE_ID")]
+    conjur_public_variable_id: Option<String>,
+    #[arg(long, env = "ENCJSON_CONJUR_PRIVATE_VARIABLE_ID")]
+    conjur_private_variable_id: Option<String>,
+    #[arg(long, env = "ENCJSON_CONJUR_CA_CERT_FILE")]
+    conjur_ca_cert_file: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_BOOTSTRAP_FROM_SOURCE", default_value_t = false)]
+    keys_bootstrap_from_source: bool,
+    #[arg(long, env = "ENCJSON_KEYS_BOOTSTRAP_STATUS", default_value = STATUS_ACTIVE)]
+    keys_bootstrap_status: String,
+    #[arg(long, env = "ENCJSON_KEYS_BOOTSTRAP_NOTE", default_value = "bootstrap-from-source")]
+    keys_bootstrap_note: String,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum KeySourceCli {
+    Env,
+    Dir,
+    #[value(name = "remote-mtls")]
+    RemoteMtls,
+    Vault,
+    Conjur,
+}
+
+impl KeySourceCli {
+    fn to_core_kind(&self) -> KeySourceKind {
+        match self {
+            KeySourceCli::Env => KeySourceKind::Env,
+            KeySourceCli::Dir => KeySourceKind::Dir,
+            KeySourceCli::RemoteMtls => KeySourceKind::RemoteMtls,
+            KeySourceCli::Vault => KeySourceKind::Vault,
+            KeySourceCli::Conjur => KeySourceKind::Conjur,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
     db: PgPool,
+    encryption_secret: String,
     auth_required: bool,
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
@@ -38,6 +171,28 @@ struct AppState {
     ui: UiCfg,
     ui_states: Arc<Mutex<HashMap<String, UiAuthState>>>,
     ui_sessions: Arc<Mutex<HashMap<String, UiSession>>>,
+    policy: Option<Policy>,
+    mtls_required: bool,
+    bootstrap: BootstrapCfg,
+}
+
+#[derive(Clone, Debug)]
+struct BootstrapCfg {
+    source_options: Option<KeySourceOptions>,
+    default_status: String,
+    default_note: String,
+}
+
+#[derive(Clone, Debug)]
+struct MtlsCfg {
+    cert_path: String,
+    key_path: String,
+    client_ca_path: String,
+}
+
+#[derive(Clone, Debug)]
+struct MtlsSpiffeIdentity {
+    spiffe_id: String,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +209,9 @@ struct KeyRow {
     status: String,
     note: Option<String>,
     tags: Vec<String>,
+    legacy_mode: bool,
+    pair_consistent: bool,
+    legacy_reason: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -110,6 +268,25 @@ struct RequestPatch {
     tenant: Option<String>,
     note: Option<String>,
     tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct BootstrapImportRequest {
+    tenant: String,
+    #[serde(rename = "env")]
+    env_name: String,
+    status: Option<String>,
+    note: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BootstrapImportResponse {
+    public_hex: String,
+    tenant: String,
+    env: String,
+    status: String,
+    note: String,
+    tags: Vec<String>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -221,9 +398,7 @@ fn public_from_private_hex(private_hex: &str) -> anyhow::Result<String> {
     Ok(hex::encode(public.as_bytes()))
 }
 
-fn encryption_key() -> anyhow::Result<[u8; 32]> {
-    let secret = std::env::var("ENCRYPTION_SECRET")
-        .map_err(|_| anyhow::anyhow!("ENCRYPTION_SECRET is required"))?;
+fn encryption_key(secret: &str) -> anyhow::Result<[u8; 32]> {
     let hash = sha2::Sha256::digest(secret.as_bytes());
     let mut key = [0u8; 32];
     key.copy_from_slice(&hash);
@@ -336,8 +511,8 @@ fn set_cookie(value: &str, secure: bool) -> HeaderMap {
     headers
 }
 
-fn encrypt_private_hex(plaintext: &str) -> anyhow::Result<String> {
-    let key = encryption_key()?;
+fn encrypt_private_hex(secret: &str, plaintext: &str) -> anyhow::Result<String> {
+    let key = encryption_key(secret)?;
     let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
@@ -350,9 +525,9 @@ fn encrypt_private_hex(plaintext: &str) -> anyhow::Result<String> {
     Ok(format!("{ENC_PREFIX}{b64}"))
 }
 
-fn decrypt_private_hex(stored: &str) -> anyhow::Result<String> {
+fn decrypt_private_hex(secret: &str, stored: &str) -> anyhow::Result<String> {
     if let Some(rest) = stored.strip_prefix(ENC_PREFIX) {
-        let key = encryption_key()?;
+        let key = encryption_key(secret)?;
         let raw = base64::engine::general_purpose::STANDARD
             .decode(rest)
             .map_err(|_| anyhow::anyhow!("decrypt failed"))?;
@@ -370,6 +545,171 @@ fn decrypt_private_hex(stored: &str) -> anyhow::Result<String> {
     Ok(stored.to_string())
 }
 
+fn build_key_source_options(args: &Args) -> anyhow::Result<Option<KeySourceOptions>> {
+    let Some(kind) = args.key_source.as_ref() else {
+        return Ok(None);
+    };
+
+    let remote_mtls = match kind {
+        KeySourceCli::RemoteMtls => Some(RemoteMtlsConfig {
+            url: args
+                .remote_keys_url
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_REMOTE_KEYS_URL is required"))?,
+            client_cert_path: args
+                .remote_tls_cert_file
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_REMOTE_TLS_CERT_FILE is required"))?,
+            client_key_path: args
+                .remote_tls_key_file
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_REMOTE_TLS_KEY_FILE is required"))?,
+            ca_cert_path: args.remote_tls_ca_file.clone(),
+        }),
+        _ => None,
+    };
+
+    let vault = match kind {
+        KeySourceCli::Vault => Some(VaultConfig {
+            addr: args
+                .vault_addr
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_VAULT_ADDR is required"))?,
+            path: args
+                .vault_path
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_VAULT_PATH is required"))?,
+            token: args
+                .vault_token
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_VAULT_TOKEN is required"))?,
+            public_field: args.vault_public_field.clone(),
+            private_field: args.vault_private_field.clone(),
+        }),
+        _ => None,
+    };
+
+    let conjur = match kind {
+        KeySourceCli::Conjur => Some(ConjurConfig {
+            appliance_url: args
+                .conjur_appliance_url
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_APPLIANCE_URL is required"))?,
+            account: args
+                .conjur_account
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_ACCOUNT is required"))?,
+            authn_login: args
+                .conjur_authn_login
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_AUTHN_LOGIN is required"))?,
+            authn_api_key: args
+                .conjur_authn_api_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_AUTHN_API_KEY is required"))?,
+            public_variable_id: args
+                .conjur_public_variable_id
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_PUBLIC_VARIABLE_ID is required"))?,
+            private_variable_id: args
+                .conjur_private_variable_id
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_PRIVATE_VARIABLE_ID is required"))?,
+            ca_cert_path: args.conjur_ca_cert_file.clone(),
+        }),
+        _ => None,
+    };
+
+    Ok(Some(KeySourceOptions {
+        kind: kind.to_core_kind(),
+        keydir: std::env::var("ENCJSON_KEYDIR").ok(),
+        remote_mtls,
+        vault,
+        conjur,
+    }))
+}
+
+async fn bootstrap_key_from_source(
+    db: &PgPool,
+    encryption_secret: &str,
+    options: &KeySourceOptions,
+    tenant: &str,
+    env: &str,
+    status: &str,
+    note: &str,
+) -> anyhow::Result<BootstrapImportResponse> {
+    if !is_valid_key_status(status.trim()) {
+        return Err(anyhow::anyhow!(
+            "status must be one of: {STATUS_ACTIVE}, {STATUS_REVOKED}"
+        ));
+    }
+    let tenant = tenant.trim();
+    let env = env.trim();
+    if tenant.is_empty() {
+        return Err(anyhow::anyhow!("tenant is required"));
+    }
+    if env.is_empty() {
+        return Err(anyhow::anyhow!("env is required"));
+    }
+
+    let loaded = load_from_source(options).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let encrypted = encrypt_private_hex(encryption_secret, loaded.private_hex.trim())?;
+    let env_tag = format!("env:{env}");
+    let source_tag = format!("source:{}", options.kind.as_str());
+    let tags = vec!["bootstrap".to_string(), source_tag, env_tag];
+    let status = status.trim().to_string();
+    let note = note.trim().to_string();
+
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "insert into tenants (name) values ($1) on conflict (name) do nothing",
+    )
+    .bind(tenant)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "insert into keys (public_hex, private_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+         on conflict (public_hex) do update \
+         set private_hex = excluded.private_hex, \
+             tenant = excluded.tenant, \
+             status = excluded.status, \
+             note = excluded.note, \
+             tags = excluded.tags, \
+             legacy_mode = excluded.legacy_mode, \
+             pair_consistent = excluded.pair_consistent, \
+             legacy_reason = excluded.legacy_reason, \
+             updated_at = now()",
+    )
+    .bind(loaded.public_hex.trim())
+    .bind(encrypted)
+    .bind(tenant)
+    .bind(&status)
+    .bind(&note)
+    .bind(&tags)
+    .bind(false)
+    .bind(true)
+    .bind(None::<String>)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    info!(
+        "bootstrap key imported from source={} for tenant={} env={}",
+        options.kind.as_str(),
+        tenant,
+        env
+    );
+    Ok(BootstrapImportResponse {
+        public_hex: loaded.public_hex,
+        tenant: tenant.to_string(),
+        env: env.to_string(),
+        status,
+        note,
+        tags,
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -380,30 +720,63 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     dotenvy::dotenv().ok();
-    let database_url = std::env::var("DATABASE_URL")
-        .map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
-    let addr: SocketAddr = std::env::var("ENCJSON_KEYS_ADDR")
-        .or_else(|_| std::env::var("ENCJSON_VAULT_ADDR"))
-        .unwrap_or_else(|_| "127.0.0.1:8080".to_string())
+    let args = Args::parse();
+    if args.keys_server_scope_required {
+        require_policy_context(args.tenant.as_deref(), args.env_name.as_deref())
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    }
+    let encryption_secret = args
+        .encryption_secret
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("ENCRYPTION_SECRET is required"))?;
+    let database_url = args
+        .database_url
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("DATABASE_URL is required"))?;
+    let addr: SocketAddr = args
+        .keys_addr
         .parse()
         .map_err(|err| anyhow::anyhow!("Invalid ENCJSON_KEYS_ADDR: {err}"))?;
-    let auth_required = std::env::var("ENCJSON_KEYS_AUTH")
-        .or_else(|_| std::env::var("ENCJSON_VAULT_AUTH"))
-        .ok()
+    let auth_required = args
+        .keys_auth
+        .as_deref()
         .map(|v| v == "required")
         .unwrap_or(false);
-    let jwt_issuer = std::env::var("ENCJSON_KEYS_JWT_ISSUER")
-        .or_else(|_| std::env::var("ENCJSON_JWT_ISSUER"))
-        .ok();
-    let jwks_url = std::env::var("ENCJSON_KEYS_JWKS_URL")
-        .or_else(|_| std::env::var("ENCJSON_JWKS_URL"))
-        .ok();
-    let jwt_audience = std::env::var("ENCJSON_KEYS_JWT_AUDIENCE")
-        .or_else(|_| std::env::var("ENCJSON_JWT_AUDIENCE"))
-        .ok();
+    let jwt_issuer = args.keys_jwt_issuer.clone();
+    let jwks_url = args.keys_jwks_url.clone();
+    let jwt_audience = args.keys_jwt_audience.clone();
+    let mtls_required = args
+        .keys_mtls_mode
+        .as_deref()
+        .map(|v| v.eq_ignore_ascii_case("required"))
+        .unwrap_or(false);
+    let tls_cert_file = args.keys_tls_cert_file.clone();
+    let tls_key_file = args.keys_tls_key_file.clone();
+    let tls_client_ca_file = args.keys_tls_client_ca_file.clone();
+    let key_source_options = build_key_source_options(&args)?;
 
     let db = PgPool::connect(&database_url).await?;
-    sqlx::migrate!().run(&db).await?;
+    sqlx::migrate!("../../migrations").run(&db).await?;
+
+    if args.keys_bootstrap_from_source {
+        let source = key_source_options
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("ENCJSON_KEY_SOURCE is required when bootstrap is enabled"))?;
+        let ctx = require_policy_context(args.tenant.as_deref(), args.env_name.as_deref())
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        let _ = bootstrap_key_from_source(
+            &db,
+            &encryption_secret,
+            source,
+            ctx.tenant.as_str(),
+            ctx.env.as_str(),
+            args.keys_bootstrap_status.as_str(),
+            args.keys_bootstrap_note.as_str(),
+        )
+        .await?;
+    }
 
     let jwks = if auth_required {
         let issuer = jwt_issuer
@@ -418,55 +791,76 @@ async fn main() -> anyhow::Result<()> {
         std::collections::HashMap::new()
     };
 
+    let policy = match args.keys_policy_file {
+        Some(path) if !path.trim().is_empty() => {
+            let parsed = Policy::from_file(std::path::Path::new(&path))
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let violations = validate_for_profile(&parsed, Profile::EncjsonKeys);
+            if !violations.is_empty() {
+                let messages = violations
+                    .iter()
+                    .map(|v| match &v.policy_id {
+                        Some(id) => format!("policy '{id}': {}", v.message),
+                        None => v.message.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(anyhow::anyhow!(
+                    "policy profile validation failed for encjson-keys: {messages}"
+                ));
+            }
+            info!("loaded policy file {}", path);
+            Some(parsed)
+        }
+        _ => None,
+    };
+
     let state = AppState {
         db,
+        encryption_secret,
         auth_required,
         jwt_issuer,
         jwt_audience,
         jwks,
         rate_limit: RateLimitCfg {
-            per_minute: std::env::var("ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60),
-            requests_per_minute: std::env::var("ENCJSON_KEYS_REQUESTS_RATE_LIMIT_PER_MINUTE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(30),
+            per_minute: args.keys_rate_limit_per_minute.unwrap_or(60),
+            requests_per_minute: args.keys_requests_rate_limit_per_minute.unwrap_or(30),
         },
         rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
         ui: UiCfg {
-            enabled: std::env::var("ENCJSON_KEYS_UI_ENABLED")
-                .ok()
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(true),
-            issuer: std::env::var("ENCJSON_KEYS_UI_ISSUER").ok(),
-            client_id: std::env::var("ENCJSON_KEYS_UI_CLIENT_ID").ok(),
-            client_secret: std::env::var("ENCJSON_KEYS_UI_CLIENT_SECRET").ok(),
-            base_url: std::env::var("ENCJSON_KEYS_UI_BASE_URL").ok(),
-            cookie_secure: std::env::var("ENCJSON_KEYS_UI_COOKIE_SECURE")
-                .ok()
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(true),
+            enabled: args.keys_ui_enabled.unwrap_or(true),
+            issuer: args.keys_ui_issuer.clone(),
+            client_id: args.keys_ui_client_id.clone(),
+            client_secret: args.keys_ui_client_secret.clone(),
+            base_url: args.keys_ui_base_url.clone(),
+            cookie_secure: args.keys_ui_cookie_secure.unwrap_or(true),
         },
         ui_states: Arc::new(Mutex::new(HashMap::new())),
         ui_sessions: Arc::new(Mutex::new(HashMap::new())),
+        policy,
+        mtls_required,
+        bootstrap: BootstrapCfg {
+            source_options: key_source_options,
+            default_status: args.keys_bootstrap_status.clone(),
+            default_note: args.keys_bootstrap_note.clone(),
+        },
     };
     let ui_enabled = state.ui.enabled;
 
     let mut app = Router::new()
-        .route("/v1/keys", get(list_keys))
-        .route("/v1/keys/{public_hex}", get(get_key).patch(patch_key))
-        .route("/v1/keys/{public_hex}/private", get(get_private_key))
-        .route("/v1/me", get(get_me))
-        .route("/v1/tenants", get(list_tenants).post(create_tenant))
-        .route("/v1/tenants/{name}", patch(rename_tenant).delete(delete_tenant))
-        .route("/v1/statuses", get(list_statuses))
-        .route("/v1/requests", get(list_requests).post(create_request))
-        .route("/v1/requests/{id}", patch(update_request))
-        .route("/v1/requests/{id}/approve", post(approve_request))
-        .route("/v1/requests/{id}/reject", post(reject_request))
-        .route("/v1/keys/reencrypt", post(reencrypt_keys));
+        .route("/api/v1/keys", get(list_keys))
+        .route("/api/v1/keys/{public_hex}", get(get_key).patch(patch_key))
+        .route("/api/v1/keys/{public_hex}/private", get(get_private_key))
+        .route("/api/v1/me", get(get_me))
+        .route("/api/v1/tenants", get(list_tenants).post(create_tenant))
+        .route("/api/v1/tenants/{name}", patch(rename_tenant).delete(delete_tenant))
+        .route("/api/v1/statuses", get(list_statuses))
+        .route("/api/v1/requests", get(list_requests).post(create_request))
+        .route("/api/v1/requests/{id}", patch(update_request))
+        .route("/api/v1/requests/{id}/approve", post(approve_request))
+        .route("/api/v1/requests/{id}/reject", post(reject_request))
+        .route("/api/v1/keys/reencrypt", post(reencrypt_keys))
+        .route("/api/v1/bootstrap/import", post(bootstrap_import));
 
     if ui_enabled {
         app = app
@@ -491,10 +885,29 @@ async fn main() -> anyhow::Result<()> {
             .route("/ui/keys/reencrypt", post(ui_reencrypt));
     }
 
-    let app = app.with_state::<()>(state);
+    let app = app.with_state::<()>(state.clone());
     info!("listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    if state.mtls_required {
+        let cert_path = tls_cert_file
+            .ok_or_else(|| anyhow::anyhow!("ENCJSON_KEYS_TLS_CERT_FILE is required in mTLS mode"))?;
+        let key_path = tls_key_file
+            .ok_or_else(|| anyhow::anyhow!("ENCJSON_KEYS_TLS_KEY_FILE is required in mTLS mode"))?;
+        let client_ca_path = tls_client_ca_file
+            .ok_or_else(|| anyhow::anyhow!("ENCJSON_KEYS_TLS_CLIENT_CA_FILE is required in mTLS mode"))?;
+        serve_mtls(
+            addr,
+            app,
+            MtlsCfg {
+                cert_path,
+                key_path,
+                client_ca_path,
+            },
+        )
+        .await?;
+    } else {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        axum::serve(listener, app).await?;
+    }
     Ok(())
 }
 
@@ -505,23 +918,21 @@ async fn list_keys(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let mut builder = QueryBuilder::<Postgres>::new(
-        "select public_hex, tenant, status, note, tags, created_at, updated_at from keys",
+        "select public_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys",
     );
     let mut has_where = false;
     let tenant_filter = if auth.is_admin {
         query.tenant
-    } else {
-        if let Some(tenant) = query.tenant {
-            if !auth.tenants.contains(&tenant) {
-                return (StatusCode::FORBIDDEN, "tenant not allowed").into_response();
-            }
-            Some(tenant)
-        } else {
-            None
+    } else if let Some(tenant) = query.tenant {
+        if !auth.tenants.contains(&tenant) {
+            return (StatusCode::FORBIDDEN, "tenant not allowed").into_response();
         }
+        Some(tenant)
+    } else {
+        None
     };
 
     if let Some(tenant) = tenant_filter {
@@ -570,10 +981,10 @@ async fn get_key(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let row = sqlx::query_as::<_, KeyRow>(
-        "select public_hex, tenant, status, note, tags, created_at, updated_at from keys where public_hex = $1",
+        "select public_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys where public_hex = $1",
     )
     .bind(public_hex)
     .fetch_optional(&state.db)
@@ -594,27 +1005,8 @@ async fn get_private_key(
     State(state): State<AppState>,
     Path(public_hex): Path<String>,
     headers: HeaderMap,
+    mtls_spiffe: Option<axum::Extension<MtlsSpiffeIdentity>>,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
-        Ok(auth) => auth,
-        Err(resp) => return resp,
-    };
-    let limiter_key = format!(
-        "{}:{}",
-        auth.subject.clone().unwrap_or_else(|| "anon".to_string()),
-        public_hex
-    );
-    let allowed = {
-        let mut limiter = state.rate_limiter.lock().await;
-        limiter.check_and_record(
-            &limiter_key,
-            state.rate_limit.per_minute,
-            Duration::from_secs(60),
-        )
-    };
-    if !allowed {
-        return (StatusCode::TOO_MANY_REQUESTS, "rate limit").into_response();
-    }
     let row = sqlx::query_as::<_, KeyPrivateRow>(
         "select public_hex, tenant, private_hex from keys where public_hex = $1",
     )
@@ -624,13 +1016,49 @@ async fn get_private_key(
 
     match row {
         Ok(Some(row)) => {
+            let auth = if headers.contains_key(axum::http::header::AUTHORIZATION) {
+                match ensure_auth(&state, &headers) {
+                    Ok(auth) => auth,
+                    Err(resp) => return *resp,
+                }
+            } else {
+                let spiffe_id = mtls_spiffe.map(|x| x.0.spiffe_id);
+                match ensure_auth_spiffe_policy(
+                    &state,
+                    &headers,
+                    "keys.private.read",
+                    &row.tenant,
+                    spiffe_id,
+                ) {
+                    Ok(auth) => auth,
+                    Err(resp) => return *resp,
+                }
+            };
+
             if !auth.is_admin && !auth.tenants.contains(&row.tenant) {
                 return (StatusCode::FORBIDDEN, "tenant not allowed").into_response();
+            }
+
+            let limiter_key = format!(
+                "{}:{}",
+                auth.subject.clone().unwrap_or_else(|| "anon".to_string()),
+                row.public_hex
+            );
+            let allowed = {
+                let mut limiter = state.rate_limiter.lock().await;
+                limiter.check_and_record(
+                    &limiter_key,
+                    state.rate_limit.per_minute,
+                    Duration::from_secs(60),
+                )
+            };
+            if !allowed {
+                return (StatusCode::TOO_MANY_REQUESTS, "rate limit").into_response();
             }
             let Some(private_hex) = row.private_hex else {
                 return (StatusCode::NOT_FOUND, "private key not available").into_response();
             };
-            let private_hex = match decrypt_private_hex(&private_hex) {
+            let private_hex = match decrypt_private_hex(&state.encryption_secret, &private_hex) {
                 Ok(v) => v,
                 Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response(),
             };
@@ -662,7 +1090,7 @@ async fn patch_key(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -672,7 +1100,7 @@ async fn patch_key(
         Err(err) => return server_error(err),
     };
     let existing = match sqlx::query_as::<_, KeyRow>(
-        "select public_hex, tenant, status, note, tags, created_at, updated_at from keys where public_hex = $1",
+        "select public_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys where public_hex = $1",
     )
     .bind(&public_hex)
     .fetch_optional(&mut *tx)
@@ -684,11 +1112,10 @@ async fn patch_key(
     };
 
     let tenant = payload.tenant.unwrap_or(existing.tenant);
-    if let Some(ref status) = payload.status {
-        if !is_valid_key_status(status) {
+    if let Some(ref status) = payload.status
+        && !is_valid_key_status(status) {
             return (StatusCode::BAD_REQUEST, "invalid status").into_response();
         }
-    }
     let status = payload.status.unwrap_or(existing.status);
     let note = payload.note.or(existing.note);
     let tags = payload.tags.unwrap_or(existing.tags);
@@ -722,7 +1149,7 @@ async fn list_tenants(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -745,7 +1172,7 @@ async fn create_tenant(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -774,7 +1201,7 @@ async fn rename_tenant(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -826,7 +1253,7 @@ async fn delete_tenant(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -903,7 +1330,7 @@ async fn list_statuses(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -918,7 +1345,7 @@ async fn create_request(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin && !auth.is_scoped {
         return (StatusCode::FORBIDDEN, "role not allowed").into_response();
@@ -958,7 +1385,7 @@ async fn create_request(
         .map(|s| s.to_string())
         .or(auth.subject.clone());
 
-    let encrypted = match encrypt_private_hex(payload.private_hex.trim()) {
+    let encrypted = match encrypt_private_hex(&state.encryption_secret, payload.private_hex.trim()) {
         Ok(v) => v,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed").into_response(),
     };
@@ -996,7 +1423,7 @@ async fn list_requests(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -1034,7 +1461,7 @@ async fn update_request(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -1098,7 +1525,7 @@ async fn reencrypt_keys(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -1124,7 +1551,7 @@ async fn reencrypt_keys(
         if private_hex.starts_with(ENC_PREFIX) {
             continue;
         }
-        let encrypted = match encrypt_private_hex(&private_hex) {
+        let encrypted = match encrypt_private_hex(&state.encryption_secret, &private_hex) {
             Ok(v) => v,
             Err(err) => return server_error(err),
         };
@@ -1151,7 +1578,7 @@ async fn reencrypt_keys(
         if private_hex.starts_with(ENC_PREFIX) {
             continue;
         }
-        let encrypted = match encrypt_private_hex(&private_hex) {
+        let encrypted = match encrypt_private_hex(&state.encryption_secret, &private_hex) {
             Ok(v) => v,
             Err(err) => return server_error(err),
         };
@@ -1172,6 +1599,47 @@ async fn reencrypt_keys(
         requests_updated,
     })
     .into_response()
+}
+
+async fn bootstrap_import(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<BootstrapImportRequest>,
+) -> impl IntoResponse {
+    let auth = match ensure_auth(&state, &headers) {
+        Ok(auth) => auth,
+        Err(resp) => return *resp,
+    };
+    if !auth.is_admin {
+        return (StatusCode::FORBIDDEN, "admin required").into_response();
+    }
+    let Some(source) = state.bootstrap.source_options.as_ref() else {
+        return (StatusCode::BAD_REQUEST, "key source is not configured").into_response();
+    };
+    let status = payload
+        .status
+        .as_deref()
+        .unwrap_or(state.bootstrap.default_status.as_str());
+    let note = payload
+        .note
+        .as_deref()
+        .unwrap_or(state.bootstrap.default_note.as_str());
+
+    let imported = match bootstrap_key_from_source(
+        &state.db,
+        &state.encryption_secret,
+        source,
+        payload.tenant.trim(),
+        payload.env_name.trim(),
+        status,
+        note,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(err) => return server_error(err),
+    };
+    Json(imported).into_response()
 }
 
 fn is_hex_64(value: &str) -> bool {
@@ -1199,7 +1667,7 @@ async fn approve_request(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -1237,7 +1705,7 @@ async fn approve_request(
     let note = payload.note.unwrap_or(req.note.clone());
     let tags = payload.tags.unwrap_or(req.tags.clone());
 
-    let decrypted = match decrypt_private_hex(private_hex.trim()) {
+    let decrypted = match decrypt_private_hex(&state.encryption_secret, private_hex.trim()) {
         Ok(v) => v,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response(),
     };
@@ -1248,17 +1716,19 @@ async fn approve_request(
     if derived != req.public_hex {
         return (StatusCode::BAD_REQUEST, "public/private mismatch").into_response();
     }
-    let encrypted_key = match encrypt_private_hex(decrypted.trim()) {
+    let encrypted_key = match encrypt_private_hex(&state.encryption_secret, decrypted.trim()) {
         Ok(v) => v,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed").into_response(),
     };
 
     let _ = sqlx::query(
-        "insert into keys (public_hex, private_hex, tenant, status, note, tags) \
-         values ($1, $2, $3, $4, $5, $6) \
+        "insert into keys (public_hex, private_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
          on conflict (public_hex) do update \
          set private_hex = excluded.private_hex, tenant = excluded.tenant, \
-             status = excluded.status, note = excluded.note, tags = excluded.tags, updated_at = now()",
+             status = excluded.status, note = excluded.note, tags = excluded.tags, \
+             legacy_mode = excluded.legacy_mode, pair_consistent = excluded.pair_consistent, \
+             legacy_reason = excluded.legacy_reason, updated_at = now()",
     )
     .bind(&req.public_hex)
     .bind(encrypted_key)
@@ -1266,6 +1736,9 @@ async fn approve_request(
     .bind(&status)
     .bind(&note)
     .bind(&tags)
+    .bind(false)
+    .bind(true)
+    .bind(None::<String>)
     .execute(&mut *tx)
     .await;
 
@@ -1303,7 +1776,7 @@ async fn reject_request(
 ) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -1585,7 +2058,7 @@ async fn ui_keys_list(State(state): State<AppState>, headers: HeaderMap) -> impl
     };
     let mut rows = String::new();
     let mut builder = QueryBuilder::<Postgres>::new(
-        "select public_hex, tenant, status, note, tags, created_at, updated_at from keys",
+        "select public_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys",
     );
     if !sess.is_admin {
         if sess.tenants.is_empty() {
@@ -1632,7 +2105,7 @@ async fn ui_key_detail(
         return (StatusCode::FORBIDDEN, "admin required").into_response();
     }
     let row = sqlx::query_as::<_, KeyRow>(
-        "select public_hex, tenant, status, note, tags, created_at, updated_at from keys where public_hex = $1",
+        "select public_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys where public_hex = $1",
     )
     .bind(public_hex.clone())
     .fetch_optional(&state.db)
@@ -1755,7 +2228,7 @@ async fn ui_request_create(
     if derived != form.public_hex.trim() {
         return (StatusCode::BAD_REQUEST, "public/private mismatch").into_response();
     }
-    let encrypted = match encrypt_private_hex(form.private_hex.trim()) {
+    let encrypted = match encrypt_private_hex(&state.encryption_secret, form.private_hex.trim()) {
         Ok(v) => v,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed").into_response(),
     };
@@ -1863,7 +2336,7 @@ async fn ui_request_approve(
     let Some(private_hex) = req.private_hex.clone() else {
         return (StatusCode::BAD_REQUEST, "private key missing in request").into_response();
     };
-    let decrypted = match decrypt_private_hex(private_hex.trim()) {
+    let decrypted = match decrypt_private_hex(&state.encryption_secret, private_hex.trim()) {
         Ok(v) => v,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response(),
     };
@@ -1874,16 +2347,18 @@ async fn ui_request_approve(
     if derived != req.public_hex {
         return (StatusCode::BAD_REQUEST, "public/private mismatch").into_response();
     }
-    let encrypted_key = match encrypt_private_hex(decrypted.trim()) {
+    let encrypted_key = match encrypt_private_hex(&state.encryption_secret, decrypted.trim()) {
         Ok(v) => v,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed").into_response(),
     };
     let _ = sqlx::query(
-        "insert into keys (public_hex, private_hex, tenant, status, note, tags) \
-         values ($1, $2, $3, $4, $5, $6) \
+        "insert into keys (public_hex, private_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason) \
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
          on conflict (public_hex) do update \
          set private_hex = excluded.private_hex, tenant = excluded.tenant, \
-             status = excluded.status, note = excluded.note, tags = excluded.tags, updated_at = now()",
+             status = excluded.status, note = excluded.note, tags = excluded.tags, \
+             legacy_mode = excluded.legacy_mode, pair_consistent = excluded.pair_consistent, \
+             legacy_reason = excluded.legacy_reason, updated_at = now()",
     )
     .bind(&req.public_hex)
     .bind(encrypted_key)
@@ -1891,6 +2366,9 @@ async fn ui_request_approve(
     .bind(STATUS_ACTIVE)
     .bind(&req.note)
     .bind(&req.tags)
+    .bind(false)
+    .bind(true)
+    .bind(None::<String>)
     .execute(&mut *tx)
     .await;
     let _ = sqlx::query(
@@ -2104,7 +2582,170 @@ enum Groups {
     Many(Vec<String>),
 }
 
-fn ensure_auth(state: &AppState, headers: &HeaderMap) -> Result<AuthContext, Response> {
+async fn serve_mtls(addr: SocketAddr, app: Router, cfg: MtlsCfg) -> anyhow::Result<()> {
+    let tls_cfg = build_tls_server_config(&cfg)?;
+    let acceptor = TlsAcceptor::from(StdArc::new(tls_cfg));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    loop {
+        let (tcp, _peer_addr) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let app = app.clone();
+        tokio::spawn(async move {
+            let tls_stream = match acceptor.accept(tcp).await {
+                Ok(s) => s,
+                Err(err) => {
+                    error!("tls handshake failed: {}", err);
+                    return;
+                }
+            };
+            let spiffe_ids = extract_spiffe_ids(&tls_stream);
+            let io = TokioIo::new(tls_stream);
+            let svc = service_fn(move |mut req: Request<hyper::body::Incoming>| {
+                let app = app.clone();
+                let spiffe_ids = spiffe_ids.clone();
+                async move {
+                    if let Some(spiffe) = spiffe_ids.first() {
+                        req.extensions_mut().insert(MtlsSpiffeIdentity {
+                            spiffe_id: spiffe.clone(),
+                        });
+                    }
+                    let mut app = app;
+                    app.call(req).await
+                }
+            });
+            if let Err(err) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                .serve_connection_with_upgrades(io, svc)
+                .await
+            {
+                error!("mtls connection error: {}", err);
+            }
+        });
+    }
+}
+
+fn build_tls_server_config(cfg: &MtlsCfg) -> anyhow::Result<rustls::ServerConfig> {
+    let certs = load_certs(&cfg.cert_path)?;
+    let key = load_private_key(&cfg.key_path)?;
+    let ca_certs = load_certs(&cfg.client_ca_path)?;
+    let mut roots = RootCertStore::empty();
+    for cert in ca_certs {
+        roots.add(cert)?;
+    }
+    let verifier = WebPkiClientVerifier::builder(StdArc::new(roots)).build()?;
+    let server_cfg = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, key)?;
+    Ok(server_cfg)
+}
+
+fn load_certs(path: &str) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("failed to open cert file {}: {}", path, e))?;
+    let mut reader = BufReader::new(file);
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("failed to read certs from {}: {}", path, e))?;
+    if certs.is_empty() {
+        return Err(anyhow::anyhow!("no certificates found in {}", path));
+    }
+    Ok(certs)
+}
+
+fn load_private_key(path: &str) -> anyhow::Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("failed to open key file {}: {}", path, e))?;
+    let mut reader = BufReader::new(file);
+    let key = rustls_pemfile::private_key(&mut reader)
+        .map_err(|e| anyhow::anyhow!("failed to read private key from {}: {}", path, e))?
+        .ok_or_else(|| anyhow::anyhow!("no private key found in {}", path))?;
+    Ok(key)
+}
+
+fn extract_spiffe_ids(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Vec<String> {
+    let (_, conn) = stream.get_ref();
+    let Some(peer_certs) = conn.peer_certificates() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for cert in peer_certs {
+        let Ok((_, parsed)) = x509_parser::parse_x509_certificate(cert.as_ref()) else {
+            continue;
+        };
+        for ext in parsed.extensions() {
+            if let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() {
+                for name in &san.general_names {
+                    if let GeneralName::URI(uri) = name
+                        && uri.starts_with("spiffe://") {
+                            out.push(uri.to_string());
+                        }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn ensure_auth_spiffe_policy(
+    state: &AppState,
+    headers: &HeaderMap,
+    action: &str,
+    tenant: &str,
+    spiffe_identity: Option<String>,
+) -> Result<AuthContext, Box<Response>> {
+    if !state.mtls_required {
+        return Err(Box::new((StatusCode::UNAUTHORIZED, "missing authorization").into_response()));
+    }
+    let Some(spiffe_id) = spiffe_identity else {
+        return Err(Box::new((
+            StatusCode::UNAUTHORIZED,
+            "missing SPIFFE identity from mTLS certificate",
+        )
+            .into_response()));
+    };
+    if !spiffe_id.starts_with("spiffe://") {
+        return Err(Box::new((StatusCode::UNAUTHORIZED, "invalid SPIFFE identity").into_response()));
+    }
+    let env = header_string(headers, "x-encjson-env");
+    let Some(policy) = state.policy.as_ref() else {
+        return Err(Box::new((StatusCode::FORBIDDEN, "policy file not configured").into_response()));
+    };
+
+    let decision = evaluate(
+        policy,
+        &EngineInput {
+            principal_spiffe_id: &spiffe_id,
+            action,
+            resource: ResourceInput::Scoped(ResourceScopedInput {
+                tenant: Some(tenant),
+                env: env.as_deref(),
+                app: None,
+                service: None,
+                public_key: None,
+            }),
+        },
+    );
+    if !matches!(decision, Decision::Allow) {
+        return Err(Box::new((StatusCode::FORBIDDEN, "spiffe policy denied").into_response()));
+    }
+
+    Ok(AuthContext {
+        is_admin: false,
+        is_scoped: true,
+        tenants: vec![tenant.to_string()],
+        subject: Some(spiffe_id),
+        groups: vec!["spiffe".to_string()],
+    })
+}
+
+fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn ensure_auth(state: &AppState, headers: &HeaderMap) -> Result<AuthContext, Box<Response>> {
     if !state.auth_required {
         return Ok(AuthContext {
             is_admin: true,
@@ -2115,24 +2756,24 @@ fn ensure_auth(state: &AppState, headers: &HeaderMap) -> Result<AuthContext, Res
         });
     }
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
-        return Err((StatusCode::UNAUTHORIZED, "missing authorization").into_response());
+        return Err(Box::new((StatusCode::UNAUTHORIZED, "missing authorization").into_response()));
     };
     let Ok(auth) = value.to_str() else {
-        return Err((StatusCode::UNAUTHORIZED, "invalid authorization").into_response());
+        return Err(Box::new((StatusCode::UNAUTHORIZED, "invalid authorization").into_response()));
     };
     if !auth.starts_with("Bearer ") {
-        return Err((StatusCode::UNAUTHORIZED, "invalid authorization").into_response());
+        return Err(Box::new((StatusCode::UNAUTHORIZED, "invalid authorization").into_response()));
     }
     let auth = auth.strip_prefix("Bearer ").unwrap_or(auth);
     let header = match decode_header(auth) {
         Ok(header) => header,
-        Err(_) => return Err((StatusCode::UNAUTHORIZED, "invalid token").into_response()),
+        Err(_) => return Err(Box::new((StatusCode::UNAUTHORIZED, "invalid token").into_response())),
     };
     let kid = header.kid.ok_or_else(|| {
-        (StatusCode::UNAUTHORIZED, "missing kid").into_response()
+        Box::new((StatusCode::UNAUTHORIZED, "missing kid").into_response())
     })?;
     let key = state.jwks.get(&kid).ok_or_else(|| {
-        (StatusCode::UNAUTHORIZED, "unknown kid").into_response()
+        Box::new((StatusCode::UNAUTHORIZED, "unknown kid").into_response())
     })?;
     let mut validation = Validation::new(header.alg);
     if let Some(issuer) = state.jwt_issuer.as_ref() {
@@ -2144,7 +2785,7 @@ fn ensure_auth(state: &AppState, headers: &HeaderMap) -> Result<AuthContext, Res
         validation.validate_aud = false;
     }
     let token = decode::<Claims>(auth, key, &validation)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "token invalid").into_response())?;
+        .map_err(|_| Box::new((StatusCode::UNAUTHORIZED, "token invalid").into_response()))?;
     let groups = token
         .claims
         .groups
@@ -2153,7 +2794,7 @@ fn ensure_auth(state: &AppState, headers: &HeaderMap) -> Result<AuthContext, Res
     let is_admin = groups.iter().any(|g| g == "encjson:role:admin");
     let is_scoped = groups.iter().any(|g| g == "encjson:role:scoped");
     if !is_admin && !is_scoped {
-        return Err((StatusCode::FORBIDDEN, "role not allowed").into_response());
+        return Err(Box::new((StatusCode::FORBIDDEN, "role not allowed").into_response()));
     }
     let tenants = groups
         .iter()
@@ -2180,7 +2821,7 @@ struct MeResponse {
 async fn get_me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     Json(MeResponse {
         subject: auth.subject,
@@ -2202,4 +2843,93 @@ fn groups_to_vec(groups: Groups) -> Vec<String> {
 fn server_error(err: impl std::fmt::Display) -> axum::response::Response {
     error!("server error: {}", err);
     (StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use encjson_core::crypto::generate_key_pair;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_suffix() -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{}-{nanos}", std::process::id())
+    }
+
+    #[tokio::test]
+    async fn bootstrap_import_from_dir_persists_encrypted_key() -> anyhow::Result<()> {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skip bootstrap integration test: DATABASE_URL is not set");
+            return Ok(());
+        };
+
+        let db = PgPool::connect(&database_url).await?;
+        sqlx::migrate!("../../migrations").run(&db).await?;
+
+        let unique = unique_suffix();
+        let tenant = format!("bootstrap-test-{unique}");
+        let env_name = "test";
+        let note = "bootstrap integration test";
+        let keydir = std::env::temp_dir().join(format!("encjson-bootstrap-{unique}"));
+        fs::create_dir_all(&keydir)?;
+        let (private_hex, public_hex) = generate_key_pair();
+        fs::write(keydir.join("public.key"), format!("{public_hex}\n"))?;
+        fs::write(keydir.join("private.key"), format!("{private_hex}\n"))?;
+
+        let options = KeySourceOptions {
+            kind: KeySourceKind::Dir,
+            keydir: Some(keydir.display().to_string()),
+            remote_mtls: None,
+            vault: None,
+            conjur: None,
+        };
+
+        let encryption_secret = "bootstrap-integration-secret";
+        let imported = bootstrap_key_from_source(
+            &db,
+            encryption_secret,
+            &options,
+            &tenant,
+            env_name,
+            STATUS_ACTIVE,
+            note,
+        )
+        .await?;
+
+        assert_eq!(imported.public_hex, public_hex);
+        assert_eq!(imported.tenant, tenant);
+        assert_eq!(imported.env, env_name);
+        assert_eq!(imported.status, STATUS_ACTIVE);
+
+        let row = sqlx::query_as::<_, (String, String, String, Vec<String>)>(
+            "select public_hex, private_hex, tenant, tags from keys where public_hex = $1",
+        )
+        .bind(&public_hex)
+        .fetch_one(&db)
+        .await?;
+
+        assert_eq!(row.0, public_hex);
+        assert_eq!(row.2, tenant);
+        assert!(row.3.iter().any(|t| t == "bootstrap"));
+        assert!(row.3.iter().any(|t| t == "source:dir"));
+        assert!(row.3.iter().any(|t| t == "env:test"));
+
+        let decrypted = decrypt_private_hex(encryption_secret, &row.1)?;
+        assert_eq!(decrypted, private_hex);
+
+        let _ = sqlx::query("delete from keys where public_hex = $1")
+            .bind(&public_hex)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("delete from tenants where name = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await;
+        let _ = fs::remove_dir_all(&keydir);
+        Ok(())
+    }
 }

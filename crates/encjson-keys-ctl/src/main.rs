@@ -1,22 +1,22 @@
 use anyhow::{anyhow, bail, Result};
 use clap::{Parser, Subcommand};
-use std::env;
+use encjson_core::{key_sources::require_policy_context, oidc_session, tui_ctl};
 
-#[path = "../oidc_session.rs"]
-mod oidc_session;
-
-#[path = "../tui_ctl.rs"]
-mod tui_ctl;
-
-const APP_NAME: &str = "encjson-ctl";
+const APP_NAME: &str = "encjson-keys-ctl";
 
 #[derive(Parser, Debug)]
-#[command(name = "encjson-ctl", version, about = "Admin TUI for encjson-keys-server")]
+#[command(name = "encjson-keys-ctl", version, about = "Admin TUI for encjson-keys-server")]
 struct Cli {
     #[arg(long, global = true)]
     insecure: Option<bool>,
-    #[arg(long, global = true, alias = "vault-url")]
+    #[arg(long, global = true, env = "ENCJSON_KEYS_URL")]
     keys_url: Option<String>,
+    #[arg(long, global = true, env = "ENCJSON_TENANT")]
+    tenant: Option<String>,
+    #[arg(long = "env", global = true, env = "ENCJSON_ENV")]
+    env_name: Option<String>,
+    #[arg(long, global = true, env = "ENCJSON_SCOPE_REQUIRED", default_value_t = false)]
+    scope_required: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -60,13 +60,15 @@ enum SessionsCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.scope_required {
+        require_policy_context(cli.tenant.as_deref(), cli.env_name.as_deref())
+            .map_err(|e| anyhow!(e.to_string()))?;
+    }
     match &cli.command {
         Commands::Tui => {
             let keys_url = cli
                 .keys_url
-                .clone()
-                .or_else(|| env::var("ENCJSON_KEYS_URL").ok())
-                .or_else(|| env::var("ENCJSON_VAULT_URL").ok());
+                .clone();
             let Some(keys_url) = keys_url else {
                 bail!("Missing keys server URL (use --keys-url or set ENCJSON_KEYS_URL)");
             };
@@ -121,7 +123,7 @@ fn handle_sessions(command: &SessionsCommand) -> Result<()> {
         SessionsCommand::List => {
             let config = oidc_session::load_sessions(APP_NAME)?;
             if config.servers.is_empty() {
-                println!("No sessions found. Run 'encjson-ctl login' first.");
+                println!("No sessions found. Run 'encjson-keys-ctl login' first.");
                 return Ok(());
             }
             println!("Active: {}", config.active);
@@ -150,7 +152,7 @@ fn handle_sessions(command: &SessionsCommand) -> Result<()> {
 fn handle_status() -> Result<()> {
     let config = oidc_session::load_sessions(APP_NAME)?;
     let Some(session) = config.servers.get(&config.active) else {
-        println!("Not logged in. Run 'encjson-ctl login --url <SERVER_URL>' first.");
+        println!("Not logged in. Run 'encjson-keys-ctl login --url <SERVER_URL>' first.");
         return Ok(());
     };
     let valid = oidc_session::is_session_valid(session);
@@ -167,7 +169,7 @@ fn handle_status() -> Result<()> {
         println!("Groups: {}", session.user_groups.join(", "));
     }
     if !valid {
-        println!("\nToken expired. Run 'encjson-ctl login' to re-authenticate.");
+        println!("\nToken expired. Run 'encjson-keys-ctl login' to re-authenticate.");
     }
     Ok(())
 }

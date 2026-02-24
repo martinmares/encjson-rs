@@ -178,11 +178,10 @@ impl SecureBox {
     }
 }
 
-/// Generate a random (private, public) pair as 64-hex strings.
+/// Generate a legacy random (private, public) pair as 64-hex strings.
 ///
-/// NOTE: This does *not* derive the public key from the private key on the
-/// X25519 curve. It generates two independent random 32-byte values, to stay
-/// compatible with the original `encjson` design.
+/// This keeps backward compatibility with old behavior where both values were
+/// generated independently and may not be curve-consistent.
 pub fn generate_key_pair() -> (String, String) {
     let mut priv_bytes = [0u8; KEY_LEN];
     let mut pub_bytes = [0u8; KEY_LEN];
@@ -197,9 +196,24 @@ pub fn generate_key_pair() -> (String, String) {
     (priv_hex, pub_hex)
 }
 
+/// Generate a curve-consistent (private, public) X25519 pair as 64-hex strings.
+pub fn generate_pair_consistent_key_pair() -> (String, String) {
+    let mut priv_bytes = [0u8; KEY_LEN];
+    let mut rng = rand::rng();
+    rng.fill_bytes(&mut priv_bytes);
+
+    let secret = StaticSecret::from(priv_bytes);
+    let public = PublicKey::from(&secret);
+
+    let priv_hex = hex::encode(priv_bytes);
+    let pub_hex = hex::encode(public.as_bytes());
+    (priv_hex, pub_hex)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key_sources::derive_public_hex_from_private;
 
     // example keys from the original discussion
     const PUBLIC_KEY: &str = "4c016009ce7246bebb08ec6856e76839a5c690cf01b30357914020aac9eebc8b";
@@ -232,5 +246,12 @@ mod tests {
         let plain = "hello";
         let dec = sb.decrypt_value(plain).unwrap();
         assert_eq!(dec, plain);
+    }
+
+    #[test]
+    fn generate_pair_consistent_key_pair_is_consistent() {
+        let (private_hex, public_hex) = generate_pair_consistent_key_pair();
+        let derived = derive_public_hex_from_private(&private_hex).unwrap();
+        assert_eq!(derived, public_hex);
     }
 }

@@ -1,0 +1,15 @@
+[package]
+name = "encjson-keys-ctl"
+version = "0.2.0"
+edition = "2024"
+
+[[bin]]
+name = "encjson-keys-ctl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+encjson-core = { workspace = true }
+tokio = { workspace = true }

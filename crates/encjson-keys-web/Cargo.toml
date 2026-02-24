@@ -1,0 +1,27 @@
+[package]
+name = "encjson-keys-web"
+version = "0.2.0"
+edition = "2024"
+
+[[bin]]
+name = "encjson-keys-web"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+urlencoding = { workspace = true }
+async-stream = "0.3"
+futures-core = "0.3"
+rand = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
