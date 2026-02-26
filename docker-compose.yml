@@ -1,7 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: encjson-vault-postgres
+    container_name: encjson-keys-postgres
     environment:
       POSTGRES_DB: encjson
       POSTGRES_USER: encjson_admin
@@ -9,7 +9,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - encjson_vault_pgdata:/var/lib/postgresql/data
+      - encjson_keys_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U encjson_admin"]
       interval: 10s
@@ -17,4 +17,4 @@ services:
       retries: 5
 
 volumes:
-  encjson_vault_pgdata:
+  encjson_keys_pgdata:

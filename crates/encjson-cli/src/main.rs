@@ -235,6 +235,10 @@ enum Commands {
         /// Print expansion trace to stderr (use RUST_LOG=debug to see it)
         #[arg(long)]
         debug: bool,
+
+        /// Return only one concrete value from `environment` / `env` object (raw value to stdout)
+        #[arg(long = "env-name", conflicts_with = "write")]
+        env_name: Option<String>,
     },
 
     /// (Deprecated) shortcut for `decrypt -o shell`
@@ -628,11 +632,13 @@ fn run(
             keydir,
             output,
             debug,
+            env_name,
         } => cmd_decrypt(
             FileInput { file, input },
             write,
             output,
             debug,
+            env_name,
             &ResolveCtx {
                 keydir,
                 private_key: private_key.as_deref(),
@@ -650,6 +656,7 @@ fn run(
             false,
             OutputFormat::Shell,
             debug,
+            None,
             &ResolveCtx {
                 keydir,
                 private_key: private_key.as_deref(),
@@ -1575,6 +1582,7 @@ fn cmd_decrypt(
     write: bool,
     output: OutputFormat,
     debug: bool,
+    env_name: Option<String>,
     ctx: &ResolveCtx<'_>,
     warn_pair_mismatch: bool,
 ) -> Result<()> {
@@ -1586,10 +1594,31 @@ fn cmd_decrypt(
     if write && !matches!(output, OutputFormat::Json) {
         return Err(Error::InvalidWriteForOutput);
     }
+    if env_name.is_some() && write {
+        return Err(Error::Http(
+            "--env-name cannot be used together with --write".to_string(),
+        ));
+    }
+    if env_name.is_some() && !matches!(output, OutputFormat::Json) {
+        return Err(Error::Http(
+            "--env-name supports only default -o json mode".to_string(),
+        ));
+    }
 
     // sjednotíme -f a pozicní argument (např. "-")
     let effective_path = input.file.or(input.input);
     let (value, pair_mismatch) = decrypt_json_with_sidecar(effective_path.as_ref(), ctx)?;
+
+    if let Some(name) = env_name {
+        let raw = get_env_value_raw(&value, &name)?;
+        print!("{raw}");
+        if pair_mismatch && warn_pair_mismatch {
+            eprintln!(
+                "Warning: legacy inconsistent key pair detected for _public_key; decryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`."
+            );
+        }
+        return Ok(());
+    }
 
     match output {
         OutputFormat::Json => {
@@ -1612,6 +1641,27 @@ fn cmd_decrypt(
             Ok(())
         }
     }
+}
+
+fn get_env_value_raw(root: &Value, env_name: &str) -> Result<String> {
+    let obj = root
+        .get("environment")
+        .or_else(|| root.get("env"))
+        .and_then(Value::as_object)
+        .ok_or(Error::MissingEnvObject)?;
+
+    let value = obj.get(env_name).ok_or_else(|| {
+        Error::Http(format!(
+            "environment value '{env_name}' not found in environment/env object"
+        ))
+    })?;
+
+    if let Some(s) = value.as_str() {
+        return Ok(s.to_string());
+    }
+
+    serde_json::to_string(value)
+        .map_err(|e| Error::Http(format!("failed to serialize '{env_name}' value: {e}")))
 }
 
 fn decrypt_json_with_sidecar(
