@@ -1,20 +1,30 @@
-[package]
-name = "encjson"
-version = "0.8.6"
-edition = "2024"
+[workspace]
+members = [
+    "crates/encjson-core",
+    "crates/encjson-cli",
+    "crates/encjson-keys-ctl",
+    "crates/encjson-keys-server",
+    "crates/encjson-keys-web",
+]
+resolver = "2"
 
-[dependencies]
+[workspace.dependencies]
 dirs = "6.0"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 hex = "0.4"
 base64 = "0.22"
-rand = "0.9"
+rand = "0.10"
 regex = "1"
 lazy_static = "1"
 thiserror = "2"
+sha2 = "0.10"
+aes-gcm = "0.10"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+urlencoding = "2.1"
 chacha20poly1305 = { version = "0.10.1" }
 blake2 = "0.10"
 ratatui = "0.30"
@@ -24,3 +34,20 @@ time = { version = "0.3", features = ["formatting", "local-offset"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tui-input = "0.15"
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+reqwest = { version = "0.13", features = ["json", "form", "blocking"] }
+openidconnect = "4.0"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "macros", "migrate"] }
+dotenvy = "0.15"
+jsonwebtoken = "10"
+serde_yaml_ng = "0.10"
+tokio-rustls = "0.26"
+rustls = "0.23"
+rustls-pemfile = "2"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
+x509-parser = "0.18"
+tower-service = "0.3"
+simple-policy-engine = { path = "../simple-policy-engine" }
+encjson-core = { path = "crates/encjson-core" }

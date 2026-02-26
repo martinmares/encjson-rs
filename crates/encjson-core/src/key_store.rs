@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use dirs::data_dir;
 
 use crate::error::Error;
+use reqwest::blocking::Client;
 
 #[cfg(not(windows))]
 fn home_dir() -> Option<PathBuf> {
@@ -56,11 +57,22 @@ pub fn default_key_dir() -> PathBuf {
 /// Načte private key pro daný public key.
 /// - pokud je nastaven ENCJSON_PRIVATE_KEY, použije ho
 /// - jinak hledá soubor `<key_dir>/<public_hex>`
-pub fn load_private_key(public_hex: &str, key_dir: Option<&Path>) -> Result<String, Error> {
-    if let Ok(pk) = env::var("ENCJSON_PRIVATE_KEY") {
-        if !pk.trim().is_empty() {
+pub fn load_private_key(
+    public_hex: &str,
+    key_dir: Option<&Path>,
+    private_key_override: Option<&str>,
+) -> Result<String, Error> {
+    if let Some(pk) = private_key_override
+        && !pk.trim().is_empty() {
             return Ok(pk.trim().to_owned());
         }
+    if let Ok(pk) = env::var("ENCJSON_PRIVATE_KEY")
+        && !pk.trim().is_empty() {
+            return Ok(pk.trim().to_owned());
+        }
+
+    if let Some(remote_key) = fetch_remote_private_key(public_hex) {
+        return Ok(remote_key);
     }
 
     let dir = key_dir.map(PathBuf::from).unwrap_or_else(default_key_dir);
@@ -76,6 +88,32 @@ pub fn load_private_key(public_hex: &str, key_dir: Option<&Path>) -> Result<Stri
     }
 }
 
+fn fetch_remote_private_key(public_hex: &str) -> Option<String> {
+    let url = env::var("ENCJSON_KEYS_URL")
+        .ok()?;
+    let token = env::var("ENCJSON_ACCESS_TOKEN").ok()?;
+    if url.trim().is_empty() || token.trim().is_empty() {
+        return None;
+    }
+    let url = format!(
+        "{}/api/v1/keys/{}/private",
+        url.trim_end_matches('/'),
+        public_hex
+    );
+    let resp = Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().ok()?;
+    body.get("private_hex")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 /// Uloží private key do souboru `<key_dir>/<public_hex>`.
 pub fn save_private_key(
     public_hex: &str,
@@ -88,6 +126,33 @@ pub fn save_private_key(
     let path = dir.join(public_hex);
     fs::write(&path, private_hex)?;
     Ok(path)
+}
+
+/// List all public keys in the key directory.
+pub fn list_public_keys(key_dir: Option<&Path>) -> Result<Vec<String>, Error> {
+    let dir = key_dir.map(PathBuf::from).unwrap_or_else(default_key_dir);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(Error::Io(e)),
+    };
+    let mut keys = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) => name,
+            None => continue,
+        };
+        if !is_hex_key_name(name) {
+            continue;
+        }
+        keys.push(name.to_string());
+    }
+    keys.sort();
+    Ok(keys)
 }
 
 fn migrate_legacy_keys(new_dir: &Path) {
@@ -192,7 +257,7 @@ mod tests {
             env::remove_var("ENCJSON_PRIVATE_KEY");
         }
 
-        let loaded = load_private_key(public_hex, Some(cli_dir.as_path())).unwrap();
+        let loaded = load_private_key(public_hex, Some(cli_dir.as_path()), None).unwrap();
         assert_eq!(loaded, "cli-private");
 
         restore_env_var("ENCJSON_KEYDIR", prev_keydir);
@@ -217,7 +282,7 @@ mod tests {
             env::remove_var("ENCJSON_PRIVATE_KEY");
         }
 
-        let loaded = load_private_key(public_hex, None).unwrap();
+        let loaded = load_private_key(public_hex, None, None).unwrap();
         assert_eq!(loaded, "env-private");
 
         restore_env_var("ENCJSON_KEYDIR", prev_keydir);

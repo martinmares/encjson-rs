@@ -4,6 +4,24 @@ A small command-line tool for storing secrets in JSON files using public/private
 
 It is designed so you can safely commit configuration files into Git, while keeping only the actual secrets encrypted, and still easily decrypt them at application startup.
 
+## Workspace Layout
+
+This repository now uses Cargo workspace layout:
+
+- `crates/encjson-core`: shared modules (crypto, JSON transforms, key store, OIDC session helpers, TUI control helpers)
+- `crates/encjson-cli`: `encjson` binary
+- `crates/encjson-keys-ctl`: `encjson-keys-ctl` binary
+- `crates/encjson-keys-server`: `encjson-keys-server` binary
+- `crates/encjson-keys-web`: `encjson-keys-web` binary (Tabler + Alpine + SSE)
+
+Goal: keep binaries thin and move reusable logic into shared crate(s) for next split (`encjson-keys-web`, etc.).
+
+## Design Docs
+
+- Key sources and secure loading model: `docs/KEY_SOURCES.md` (proposed design)
+- Key sources implementation plan: `docs/KEY_SOURCES_RFC.md` (phase checklist + acceptance criteria)
+
+
 ## Overview
 
 `encjson-rs` is designed for files like:
@@ -99,6 +117,7 @@ Properties:
 ## Features
 
 - Generate random public/private key pairs (`encjson init`)
+- Show key mapping for secured file (`encjson info`)
 - Encrypt JSON files in place or to stdout (`encjson encrypt`)
 - Decrypt JSON files with multiple output formats (`encjson decrypt -o json|shell|dot-env`)
 - Edit environment values in a terminal UI (`encjson edit`)
@@ -145,11 +164,305 @@ target/release/encjson
 docker compose up -d
 ```
 
-Then set `.env` (see `.env.example`) and run the vault server:
+Then set `.env` (see `.env.example`) and run the keys server:
 
 ```bash
 export DATABASE_URL=postgres://encjson_admin:encjson_admin@localhost:5432/encjson
-cargo run --bin encjson-vault-server
+cargo run --bin encjson-keys-server
+```
+
+Keys server requires:
+
+```bash
+export ENCRYPTION_SECRET=change-me-to-a-secure-random-secret-at-least-32-chars
+export ENCJSON_KEYS_AUTH=required
+export ENCJSON_KEYS_JWT_ISSUER=https://sso.example.com
+```
+
+True mTLS mode (client cert required):
+
+```bash
+export ENCJSON_KEYS_MTLS_MODE=required
+export ENCJSON_KEYS_TLS_CERT_FILE=/etc/tls/tls.crt
+export ENCJSON_KEYS_TLS_KEY_FILE=/etc/tls/tls.key
+export ENCJSON_KEYS_TLS_CLIENT_CA_FILE=/etc/tls/ca.crt
+```
+
+Optional SPIFFE policy authorization:
+
+```bash
+export ENCJSON_KEYS_POLICY_FILE=/etc/encjson/policy.yaml
+```
+
+Policy loading/validation is handled by shared crate `simple-policy-engine`
+with profile `EncjsonKeys`.
+
+Example `policy.yaml`:
+
+```yaml
+authz:
+  default: deny
+  policies:
+    - id: address-mgmt-read-test
+      principal:
+        spiffe_id: "spiffe://cluster.local/o2/address-management/api"
+      allow:
+        - action: "keys.private.read"
+          resource:
+            tenant: "tsm"
+            env: ["test"]
+    - id: admin-all
+      principal:
+        spiffe_id: "spiffe://cluster.local/o2/platform/admin"
+      allow:
+        - action: "*"
+          resource: "*"
+```
+
+When `Authorization` header is missing, endpoint `GET /api/v1/keys/{public_hex}/private`
+can authorize via SPIFFE policy.
+
+- In true mTLS mode (`ENCJSON_KEYS_MTLS_MODE=required`), SPIFFE identity is extracted from
+  client certificate URI SAN.
+- `x-spiffe-id` header is not accepted.
+- optional `x-encjson-env: test`
+- If `ENCJSON_KEYS_POLICY_FILE` is configured but invalid for profile `EncjsonKeys`,
+  server startup fails (fail-closed).
+
+## Keys Server Runtime Modes
+
+`encjson-keys-server` supports both CLI arguments and environment variables (same names via `clap` `env = ...` mapping).
+
+### Important: Single Port Behavior
+
+The server always listens on one address (`ENCJSON_KEYS_ADDR`). It does not open separate HTTP and mTLS ports.
+
+- `ENCJSON_KEYS_MTLS_MODE=required`: server runs TLS listener with client certificate verification (true mTLS).
+- otherwise: server runs plain HTTP listener.
+
+### Mode 1: HTTP + OAuth2/JWT
+
+Use when TLS is terminated by reverse proxy / ingress (wildcard cert).
+
+```bash
+export ENCJSON_KEYS_AUTH=required
+export ENCJSON_KEYS_JWT_ISSUER=https://sso.example.com
+# optional:
+# export ENCJSON_KEYS_JWKS_URL=https://sso.example.com/.well-known/jwks.json
+# export ENCJSON_KEYS_JWT_AUDIENCE=encjson-keys
+# ENCJSON_KEYS_MTLS_MODE not set
+```
+
+### Mode 2: True mTLS + SPIFFE policy
+
+Use when `encjson-keys-server` terminates TLS directly and requires client cert.
+
+```bash
+export ENCJSON_KEYS_MTLS_MODE=required
+export ENCJSON_KEYS_TLS_CERT_FILE=/etc/tls/tls.crt
+export ENCJSON_KEYS_TLS_KEY_FILE=/etc/tls/tls.key
+export ENCJSON_KEYS_TLS_CLIENT_CA_FILE=/etc/tls/ca.crt
+export ENCJSON_KEYS_POLICY_FILE=/etc/encjson/policy.yaml
+```
+
+### Mode 3: mTLS + OAuth2/JWT
+
+Both layers can be enabled together:
+
+```bash
+export ENCJSON_KEYS_MTLS_MODE=required
+export ENCJSON_KEYS_AUTH=required
+```
+
+Request flow is:
+
+1. TLS handshake + client cert verification (transport layer).
+2. HTTP auth/authorization logic (application layer).
+
+In current implementation this is not strict "JWT and SPIFFE simultaneously on every endpoint". Most endpoints use JWT auth when enabled; endpoint `GET /api/v1/keys/{public_hex}/private` can use SPIFFE policy path when `Authorization` header is missing.
+
+## ENV <-> CLI Matrix
+
+This project now uses a unified model: every supported runtime environment variable has a corresponding CLI option.
+
+### `encjson` CLI
+
+| ENV | CLI |
+| --- | --- |
+| `ENCJSON_KEYDIR` | `-k, --keydir` |
+| `ENCJSON_KEYS_URL` | `--keys-url` (`register`, `sync`) |
+| `ENCJSON_ACCESS_TOKEN` | `--token` (`register`, `sync`) |
+| `ENCJSON_PRIVATE_KEY` | `--private-key` (global) |
+| `ENCJSON_TENANT` | `--tenant` (global) |
+| `ENCJSON_ENV` | `--env` (global) |
+| `ENCJSON_SCOPE_REQUIRED` | `--scope-required` (global) |
+| `ENCJSON_KEY_SOURCE` | `--key-source` (global: `env|dir|remote-mtls|vault|conjur`) |
+| `ENCJSON_REMOTE_KEYS_URL` | `--remote-keys-url` (global) |
+| `ENCJSON_REMOTE_TLS_CERT_FILE` | `--remote-tls-cert-file` (global) |
+| `ENCJSON_REMOTE_TLS_KEY_FILE` | `--remote-tls-key-file` (global) |
+| `ENCJSON_REMOTE_TLS_CA_FILE` | `--remote-tls-ca-file` (global) |
+| `ENCJSON_VAULT_ADDR` | `--vault-addr` (global) |
+| `ENCJSON_VAULT_PATH` | `--vault-path` (global) |
+| `ENCJSON_VAULT_TOKEN` | `--vault-token` (global) |
+| `ENCJSON_VAULT_PUBLIC_FIELD` | `--vault-public-field` (global) |
+| `ENCJSON_VAULT_PRIVATE_FIELD` | `--vault-private-field` (global) |
+| `ENCJSON_CONJUR_APPLIANCE_URL` | `--conjur-appliance-url` (global) |
+| `ENCJSON_CONJUR_ACCOUNT` | `--conjur-account` (global) |
+| `ENCJSON_CONJUR_AUTHN_LOGIN` | `--conjur-authn-login` (global) |
+| `ENCJSON_CONJUR_AUTHN_API_KEY` | `--conjur-authn-api-key` (global) |
+| `ENCJSON_CONJUR_PUBLIC_VARIABLE_ID` | `--conjur-public-variable-id` (global) |
+| `ENCJSON_CONJUR_PRIVATE_VARIABLE_ID` | `--conjur-private-variable-id` (global) |
+| `ENCJSON_CONJUR_CA_CERT_FILE` | `--conjur-ca-cert-file` (global) |
+
+### `encjson-keys-ctl` CLI
+
+| ENV | CLI |
+| --- | --- |
+| `ENCJSON_KEYS_URL` | `--keys-url` |
+| `ENCJSON_TENANT` | `--tenant` (global) |
+| `ENCJSON_ENV` | `--env` (global) |
+| `ENCJSON_SCOPE_REQUIRED` | `--scope-required` (global) |
+
+### `encjson-keys-server`
+
+| ENV | CLI |
+| --- | --- |
+| `DATABASE_URL` | `--database-url` |
+| `ENCRYPTION_SECRET` | `--encryption-secret` |
+| `ENCJSON_KEYS_ADDR` | `--keys-addr` |
+| `ENCJSON_KEYS_AUTH` | `--keys-auth` |
+| `ENCJSON_KEYS_JWT_ISSUER` | `--keys-jwt-issuer` |
+| `ENCJSON_KEYS_JWKS_URL` | `--keys-jwks-url` |
+| `ENCJSON_KEYS_JWT_AUDIENCE` | `--keys-jwt-audience` |
+| `ENCJSON_KEYS_MTLS_MODE` | `--keys-mtls-mode` |
+| `ENCJSON_KEYS_POLICY_FILE` | `--keys-policy-file` |
+| `ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE` | `--keys-rate-limit-per-minute` |
+| `ENCJSON_KEYS_REQUESTS_RATE_LIMIT_PER_MINUTE` | `--keys-requests-rate-limit-per-minute` |
+| `ENCJSON_KEYS_UI_ENABLED` | `--keys-ui-enabled` |
+| `ENCJSON_KEYS_UI_ISSUER` | `--keys-ui-issuer` |
+| `ENCJSON_KEYS_UI_CLIENT_ID` | `--keys-ui-client-id` |
+| `ENCJSON_KEYS_UI_CLIENT_SECRET` | `--keys-ui-client-secret` |
+| `ENCJSON_KEYS_UI_BASE_URL` | `--keys-ui-base-url` |
+| `ENCJSON_KEYS_UI_COOKIE_SECURE` | `--keys-ui-cookie-secure` |
+| `ENCJSON_KEYS_TLS_CERT_FILE` | `--keys-tls-cert-file` |
+| `ENCJSON_KEYS_TLS_KEY_FILE` | `--keys-tls-key-file` |
+| `ENCJSON_KEYS_TLS_CLIENT_CA_FILE` | `--keys-tls-client-ca-file` |
+| `ENCJSON_KEYS_SERVER_SCOPE_REQUIRED` | `--keys-server-scope-required` |
+| `ENCJSON_TENANT` | `--tenant` |
+| `ENCJSON_ENV` | `--env` |
+| `ENCJSON_KEYS_BOOTSTRAP_FROM_SOURCE` | `--keys-bootstrap-from-source` |
+| `ENCJSON_KEYS_BOOTSTRAP_STATUS` | `--keys-bootstrap-status` |
+| `ENCJSON_KEYS_BOOTSTRAP_NOTE` | `--keys-bootstrap-note` |
+| `ENCJSON_KEY_SOURCE` | `--key-source` (`env|dir|remote-mtls|vault|conjur`) |
+| `ENCJSON_REMOTE_KEYS_URL` | `--remote-keys-url` |
+| `ENCJSON_REMOTE_TLS_CERT_FILE` | `--remote-tls-cert-file` |
+| `ENCJSON_REMOTE_TLS_KEY_FILE` | `--remote-tls-key-file` |
+| `ENCJSON_REMOTE_TLS_CA_FILE` | `--remote-tls-ca-file` |
+| `ENCJSON_VAULT_ADDR` | `--vault-addr` |
+| `ENCJSON_VAULT_PATH` | `--vault-path` |
+| `ENCJSON_VAULT_TOKEN` | `--vault-token` |
+| `ENCJSON_VAULT_PUBLIC_FIELD` | `--vault-public-field` |
+| `ENCJSON_VAULT_PRIVATE_FIELD` | `--vault-private-field` |
+| `ENCJSON_CONJUR_APPLIANCE_URL` | `--conjur-appliance-url` |
+| `ENCJSON_CONJUR_ACCOUNT` | `--conjur-account` |
+| `ENCJSON_CONJUR_AUTHN_LOGIN` | `--conjur-authn-login` |
+| `ENCJSON_CONJUR_AUTHN_API_KEY` | `--conjur-authn-api-key` |
+| `ENCJSON_CONJUR_PUBLIC_VARIABLE_ID` | `--conjur-public-variable-id` |
+| `ENCJSON_CONJUR_PRIVATE_VARIABLE_ID` | `--conjur-private-variable-id` |
+| `ENCJSON_CONJUR_CA_CERT_FILE` | `--conjur-ca-cert-file` |
+
+### `encjson-keys-server` Bootstrap
+
+Startup import (source -> validate -> encrypt -> upsert DB):
+
+```bash
+export ENCJSON_KEYS_BOOTSTRAP_FROM_SOURCE=true
+export ENCJSON_KEY_SOURCE=dir
+export ENCJSON_KEYDIR=/etc/encjson/keys
+export ENCJSON_TENANT=tsm
+export ENCJSON_ENV=test
+```
+
+Behavior:
+- loads one keypair from selected source (`env|dir|remote-mtls|vault|conjur`)
+- validates public/private match
+- encrypts private key with `ENCRYPTION_SECRET`
+- upserts into `keys` table
+- ensures `tenants` row exists
+- sets tags `bootstrap`, `source:<kind>`, `env:<env>`
+
+Admin API variant (same pipeline):
+
+`POST /api/v1/bootstrap/import`
+
+```json
+{
+  "tenant": "tsm",
+  "env": "test",
+  "status": "active",
+  "note": "manual bootstrap"
+}
+```
+
+### `encjson-keys-web`
+
+| ENV | CLI |
+| --- | --- |
+| `ENCJSON_KEYS_WEB_BIND` | `--bind` |
+| `ENCJSON_KEYS_WEB_KEYS_SERVER` | `--keys-server` |
+| `ENCJSON_KEYS_WEB_AUTH_MODE` | `--auth-mode` (`local`/`oidc`) |
+| `ENCJSON_KEYS_WEB_OPEN` | `--open` |
+| `ENCJSON_KEYS_WEB_OIDC_ISSUER` | `--oidc-issuer` |
+| `ENCJSON_KEYS_WEB_OIDC_CLIENT_ID` | `--oidc-client-id` |
+| `ENCJSON_KEYS_WEB_OIDC_CLIENT_SECRET` | `--oidc-client-secret` |
+| `ENCJSON_KEYS_WEB_OIDC_REDIRECT_BASE_URL` | `--oidc-redirect-base-url` |
+| `ENCJSON_KEYS_WEB_OIDC_SCOPES` | `--oidc-scopes` |
+| `ENCJSON_KEYS_WEB_OIDC_ADMIN_ROLE` | `--oidc-admin-role` |
+| `ENCJSON_KEYS_WEB_OIDC_SCOPED_ROLE` | `--oidc-scoped-role` |
+| `ENCJSON_KEYS_WEB_OIDC_COOKIE_SECURE` | `--oidc-cookie-secure` |
+
+Key source unification (`env`/`dir`/`remote-mtls`/`vault`/`conjur`/`cli`) is documented in `docs/KEY_SOURCES.md`.
+
+Local admin mode (loopback only, no OIDC):
+
+```bash
+cargo run -p encjson-keys-web -- --bind 127.0.0.1:8189 --auth-mode local --open
+```
+
+OIDC mode:
+
+```bash
+cargo run -p encjson-keys-web -- \
+  --bind 0.0.0.0:8189 \
+  --auth-mode oidc \
+  --keys-server https://encjson-keys-server.internal \
+  --oidc-issuer https://sso.example.com \
+  --oidc-client-id encjson-keys-web \
+  --oidc-client-secret '***' \
+  --oidc-redirect-base-url https://encjson-keys-web.example.com
+```
+
+Web UI (optional):
+
+```bash
+export ENCJSON_KEYS_UI_ENABLED=true
+export ENCJSON_KEYS_UI_ISSUER=https://sso.example.com
+export ENCJSON_KEYS_UI_CLIENT_ID=encjson-keys-ui
+export ENCJSON_KEYS_UI_CLIENT_SECRET=...
+export ENCJSON_KEYS_UI_BASE_URL=https://keys.example.com
+export ENCJSON_KEYS_UI_COOKIE_SECURE=true
+```
+
+Optional rate limit for private key access:
+
+```bash
+export ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE=60
+```
+
+Optional rate limit for key registration requests:
+
+```bash
+export ENCJSON_KEYS_REQUESTS_RATE_LIMIT_PER_MINUTE=30
 ```
 
 (You can copy or symlink it somewhere in `$PATH`, e.g. `/usr/local/bin/encjson`.)
@@ -188,6 +501,28 @@ encjson decrypt -f env.secured.json -k /etc/encjson
 encjson env -f env.secured.json -k /etc/encjson
 ```
 
+### Register: secure private key input
+
+For explicit key registration to keys server, prefer secure private key input:
+
+```bash
+encjson register <PUBLIC_HEX> \
+  --tenant tsm \
+  --note "bootstrap" \
+  --private-key-file /secure/path/private.key \
+  --keys-url http://127.0.0.1:8080 \
+  --token "$ENCJSON_ACCESS_TOKEN"
+```
+
+Alternative secure options:
+
+- `--private-key-fd <N>`
+- `--private-key-stdin`
+
+Raw private key argument is insecure and requires explicit opt-in:
+
+- `--private-key <HEX> --allow-insecure-cli-private-key`
+
 ### Vault login (OIDC)
 
 ```bash
@@ -214,19 +549,40 @@ Typical output:
 Generated key pair (hex):
  => 🍺 public:  91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640
  => 🔑 private: 24e55b25c598d4df78387de983b455144e197e3e63239d0c1fc92f862bbd7c0c
- => 💾 saved to: /home/user/.encjson/91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640
+ => 💾 saved to: /home/user/.config/encjson/91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640
 ```
 
 By default, the private key is saved to:
 
 - `$ENCJSON_KEYDIR/<public_hex>` if `ENCJSON_KEYDIR` is set, or
-- `~/.encjson/<public_hex>` otherwise.
+- a **dirs-based OS config directory** otherwise:
+  - macOS: `~/Library/Application Support/encjson/<public_hex>`
+  - Linux: `~/.config/encjson/<public_hex>`
+  - Windows: `%APPDATA%\\encjson\\<public_hex>` (or user profile fallback)
 
 You can override the directory:
 
 ```bash
 encjson init -k /etc/encjson
 ```
+
+### 1.1 Show key info for file (`info`)
+
+Use `info` when you need to inspect which key pair a secured file currently uses:
+
+```bash
+encjson info -f env.secured.json
+```
+
+Example output:
+
+```text
+public_key: 5be9bd0c23a4b402d7f8549147002047359d182be8452f7fcc607ffd3387a732
+private_key: e50c09e30d48486a39e976c5c7addd6d4ccb320a581806d310a12d3e75eeda7b
+pair_consistent: true
+```
+
+`pair_consistent: false` means the file still uses a legacy inconsistent pair.
 
 ### 2. Encrypt a JSON file (`encrypt`)
 
@@ -318,6 +674,98 @@ To override the key directory:
 ```bash
 encjson decrypt -f env.secured.json -w -k /etc/encjson
 ```
+
+#### Optional sidecar schema for post-decrypt transforms
+
+If a sidecar file exists next to the decrypted file, `encjson` applies key-level transforms
+after decryption and before output:
+
+- `mtls.secured.json` -> sidecar `mtls.secured.schema.json`
+- `foo.json` -> sidecar `foo.schema.json`
+
+Minimal schema format:
+
+```json
+{
+  "MTLS_*": {
+    "encoding": "base64",
+    "normalize_line_endings": true
+  },
+  "*": {
+    "encoding": "plain",
+    "normalize_line_endings": false
+  }
+}
+```
+
+Matching priority:
+
+1. exact key (`FOO_BAR`)
+2. prefix pattern (`MTLS_*`, longest prefix wins)
+3. wildcard (`*`)
+
+Supported values:
+
+- `encoding`: `plain` | `base64`
+- `normalize_line_endings`: `true` | `false`
+
+#### Render Kubernetes Secret YAML
+
+You can decrypt + apply sidecar schema transforms and directly render Kubernetes Secret YAML:
+
+```bash
+encjson render-k8s-secret \
+  -f mtls.secured.json \
+  --name mtls-test-tsm-dms-tsm-dms \
+  --namespace nac-test \
+  --from-env MTLS_TEST_TSM_DMS_TLS_CRT=tls.crt \
+  --from-env MTLS_TEST_TSM_DMS_TLS_KEY=tls.key \
+  --from-env MTLS_TEST_TSM_DMS_CA_CRT=ca.crt
+```
+
+- If `--from-env` is omitted, all string keys from `environment`/`env` are included.
+- Output is `Secret` manifest with `data` (base64-encoded values).
+- Default secret type is `kubernetes.io/tls`.
+- For `kubernetes.io/tls`, required keys are: `ca.crt`, `tls.crt`, `tls.key`.
+- Optional override: `--secret-type Opaque`
+
+Render key pair secret (`_public_key` + resolved private key):
+
+```bash
+encjson render-k8s-pair-secret \
+  -f env.secured.json \
+  --name tsm-secrets \
+  --namespace nac-test
+```
+
+Optional key names:
+
+```bash
+encjson render-k8s-pair-secret \
+  -f env.secured.json \
+  --name tsm-secrets \
+  --namespace nac-test \
+  --public-key-name public-key \
+  --private-key-name private-key
+```
+
+Multi-secret mode (`---` multi-doc YAML):
+
+```bash
+encjson render-k8s-secret \
+  -f mtls.secured.json \
+  --namespace nac-test \
+  --from-env-secret MTLS_TEST_TSM_DMS_TLS_CRT=mtls-test-tsm-dms-tsm-dms/tls.crt \
+  --from-env-secret MTLS_TEST_TSM_DMS_TLS_KEY=mtls-test-tsm-dms-tsm-dms/tls.key \
+  --from-env-secret MTLS_TEST_TSM_DMS_CA_CRT=mtls-test-tsm-dms-tsm-dms/ca.crt \
+  --from-env-secret MTLS_TEST_TSM_UI_TLS_CRT=mtls-test-tsm-ui-tsm-ui/tls.crt \
+  --from-env-secret MTLS_TEST_TSM_UI_TLS_KEY=mtls-test-tsm-ui-tsm-ui/tls.key \
+  --from-env-secret MTLS_TEST_TSM_UI_CA_CRT=mtls-test-tsm-ui-tsm-ui/ca.crt
+```
+
+- `--from-env-secret` format: `ENV_KEY=secretName/secretKey`
+- `--name` is optional in this mode
+- Do not mix `--from-env` and `--from-env-secret`
 
 #### Reading from stdin
 
@@ -498,10 +946,14 @@ Up/Down select | Shift+Up/Down move | e edit | / filter | a add | r rename | d d
 The tool finds the private key in this order:
 
 1. If `ENCJSON_PRIVATE_KEY` is set and non-empty, it is used directly as a 64-hex string.
-2. Otherwise it looks up a file named `<public_hex>` in:
+2. If `ENCJSON_KEYS_URL` is set **and** `ENCJSON_ACCESS_TOKEN` is present, it fetches the key remotely.
+3. Otherwise it looks up a file named `<public_hex>` in:
    - the `-k/--keydir` CLI argument (if provided), or
    - `$ENCJSON_KEYDIR` (if set), or
-   - `~/.encjson`.
+   - the dirs-based config directory:
+     - macOS: `~/Library/Application Support/encjson`
+     - Linux: `~/.config/encjson`
+     - Windows: `%APPDATA%\\encjson`
 
 If no key can be found, the command fails with a clear error.
 
@@ -544,23 +996,23 @@ This makes the output more predictable in logs and on terminals with limited fon
 The default key directory is determined as follows:
 
 1. If `ENCJSON_KEYDIR` is set, it is always used (on all platforms).
-2. Otherwise:
-   - On Unix-like systems:
-     - `~/.encjson` (based on `$HOME`).
-   - On Windows:
-     - If `HOME` is set (e.g. Git Bash / MSYS), use `%HOME%\.encjson`.
-     - Else, if `USERPROFILE` is set, use `%USERPROFILE%\.encjson`
-       (typical case: `C:\Users\<name>\.encjson`).
-     - Else, if both `HOMEDRIVE` and `HOMEPATH` are set, use `%HOMEDRIVE%%HOMEPATH%\.encjson`.
-     - As a last-resort fallback, `.\.encjson` in the current working directory.
+2. Otherwise use OS config directory (via `dirs` crate):
+   - macOS: `~/Library/Application Support/encjson`
+   - Linux: `~/.config/encjson`
+   - Windows: `%APPDATA%\\encjson` (or user profile fallback)
 
 In practice, on a “normal” Windows 10/11 installation, the default ends up under the user’s profile directory, e.g.:
 
 ```text
-C:\Users\YourName\.encjson
+C:\Users\YourName\AppData\Roaming\encjson
 ```
 
 If you want complete control (for example, to share a key directory between WSL, Git Bash and native Windows binaries), set `ENCJSON_KEYDIR` explicitly on that machine.
+
+### Migration from legacy `~/.encjson`
+
+On startup, if `~/.encjson` exists and the new dirs-based directory does not,
+keys are migrated automatically (only files with hex names).
 
 ## Migration from the Crystal version
 
@@ -610,4 +1062,3 @@ AGPLv3 License - see [LICENSE](LICENSE) file for details
 ## Author
 
 Martin Mareš
-
