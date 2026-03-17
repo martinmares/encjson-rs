@@ -1,13 +1,13 @@
 mod tui_edit;
 mod tui_register;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use base64::Engine as _;
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Read};
-use std::path::PathBuf;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::collections::BTreeMap;
 
@@ -35,60 +35,83 @@ struct Cli {
     #[arg(short = 'v', long = "version")]
     version: bool,
 
-    #[arg(long, global = true)]
-    insecure: Option<bool>,
-
-    #[arg(long, global = true, env = "ENCJSON_PRIVATE_KEY")]
-    private_key: Option<String>,
-
-    #[arg(long, global = true, env = "ENCJSON_TENANT")]
-    tenant: Option<String>,
-
-    #[arg(long = "env", global = true, env = "ENCJSON_ENV")]
-    env_name: Option<String>,
-
-    #[arg(long, global = true, env = "ENCJSON_SCOPE_REQUIRED", default_value_t = false)]
-    scope_required: bool,
-    #[arg(long, global = true, env = "ENCJSON_LEGACY_MODE", default_value_t = true)]
-    legacy_mode: bool,
-
-    #[arg(long, global = true, env = "ENCJSON_KEY_SOURCE", value_enum)]
-    key_source: Option<KeySourceCli>,
-    #[arg(long, global = true, env = "ENCJSON_REMOTE_KEYS_URL")]
-    remote_keys_url: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_REMOTE_TLS_CERT_FILE")]
-    remote_tls_cert_file: Option<PathBuf>,
-    #[arg(long, global = true, env = "ENCJSON_REMOTE_TLS_KEY_FILE")]
-    remote_tls_key_file: Option<PathBuf>,
-    #[arg(long, global = true, env = "ENCJSON_REMOTE_TLS_CA_FILE")]
-    remote_tls_ca_file: Option<PathBuf>,
-    #[arg(long, global = true, env = "ENCJSON_VAULT_ADDR")]
-    vault_addr: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_VAULT_PATH")]
-    vault_path: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_VAULT_TOKEN")]
-    vault_token: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_VAULT_PUBLIC_FIELD")]
-    vault_public_field: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_VAULT_PRIVATE_FIELD")]
-    vault_private_field: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_CONJUR_APPLIANCE_URL")]
-    conjur_appliance_url: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_CONJUR_ACCOUNT")]
-    conjur_account: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_CONJUR_AUTHN_LOGIN")]
-    conjur_authn_login: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_CONJUR_AUTHN_API_KEY")]
-    conjur_authn_api_key: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_CONJUR_PUBLIC_VARIABLE_ID")]
-    conjur_public_variable_id: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_CONJUR_PRIVATE_VARIABLE_ID")]
-    conjur_private_variable_id: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_CONJUR_CA_CERT_FILE")]
-    conjur_ca_cert_file: Option<PathBuf>,
-
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+struct ResolveArgs {
+    /// Raw private key override
+    #[arg(long, env = "ENCJSON_PRIVATE_KEY", help_heading = "Key Resolution")]
+    private_key: Option<String>,
+
+    /// Policy tenant
+    #[arg(long, env = "ENCJSON_TENANT", help_heading = "Key Resolution")]
+    tenant: Option<String>,
+
+    /// Policy environment
+    #[arg(long = "env", env = "ENCJSON_ENV", value_name = "ENV", help_heading = "Key Resolution")]
+    env_name: Option<String>,
+
+    /// Require tenant+env when policy-backed source is used
+    #[arg(long, env = "ENCJSON_SCOPE_REQUIRED", default_value_t = false, help_heading = "Key Resolution")]
+    scope_required: bool,
+
+    /// Allow legacy inconsistent key pairs
+    #[arg(long, env = "ENCJSON_LEGACY_MODE", default_value_t = true, help_heading = "Key Resolution")]
+    legacy_mode: bool,
+
+    /// Resolve key material from provider instead of local store
+    #[arg(long, env = "ENCJSON_KEY_SOURCE", value_enum, help_heading = "Key Resolution")]
+    key_source: Option<KeySourceCli>,
+    /// Remote mTLS keys server URL
+    #[arg(long, env = "ENCJSON_REMOTE_KEYS_URL", help_heading = "Key Resolution")]
+    remote_keys_url: Option<String>,
+    /// Client certificate for remote mTLS source
+    #[arg(long, env = "ENCJSON_REMOTE_TLS_CERT_FILE", help_heading = "Key Resolution")]
+    remote_tls_cert_file: Option<PathBuf>,
+    /// Client private key for remote mTLS source
+    #[arg(long, env = "ENCJSON_REMOTE_TLS_KEY_FILE", help_heading = "Key Resolution")]
+    remote_tls_key_file: Option<PathBuf>,
+    /// CA bundle for remote mTLS source
+    #[arg(long, env = "ENCJSON_REMOTE_TLS_CA_FILE", help_heading = "Key Resolution")]
+    remote_tls_ca_file: Option<PathBuf>,
+    /// HashiCorp Vault base URL
+    #[arg(long, env = "ENCJSON_VAULT_ADDR", help_heading = "Key Resolution")]
+    vault_addr: Option<String>,
+    /// Vault secret path
+    #[arg(long, env = "ENCJSON_VAULT_PATH", help_heading = "Key Resolution")]
+    vault_path: Option<String>,
+    /// Vault token
+    #[arg(long, env = "ENCJSON_VAULT_TOKEN", help_heading = "Key Resolution")]
+    vault_token: Option<String>,
+    /// Vault field containing public key
+    #[arg(long, env = "ENCJSON_VAULT_PUBLIC_FIELD", help_heading = "Key Resolution")]
+    vault_public_field: Option<String>,
+    /// Vault field containing private key
+    #[arg(long, env = "ENCJSON_VAULT_PRIVATE_FIELD", help_heading = "Key Resolution")]
+    vault_private_field: Option<String>,
+    /// CyberArk Conjur appliance URL
+    #[arg(long, env = "ENCJSON_CONJUR_APPLIANCE_URL", help_heading = "Key Resolution")]
+    conjur_appliance_url: Option<String>,
+    /// Conjur account
+    #[arg(long, env = "ENCJSON_CONJUR_ACCOUNT", help_heading = "Key Resolution")]
+    conjur_account: Option<String>,
+    /// Conjur authn login
+    #[arg(long, env = "ENCJSON_CONJUR_AUTHN_LOGIN", help_heading = "Key Resolution")]
+    conjur_authn_login: Option<String>,
+    /// Conjur authn API key
+    #[arg(long, env = "ENCJSON_CONJUR_AUTHN_API_KEY", help_heading = "Key Resolution")]
+    conjur_authn_api_key: Option<String>,
+    /// Conjur variable id containing public key
+    #[arg(long, env = "ENCJSON_CONJUR_PUBLIC_VARIABLE_ID", help_heading = "Key Resolution")]
+    conjur_public_variable_id: Option<String>,
+    /// Conjur variable id containing private key
+    #[arg(long, env = "ENCJSON_CONJUR_PRIVATE_VARIABLE_ID", help_heading = "Key Resolution")]
+    conjur_private_variable_id: Option<String>,
+    /// CA bundle for Conjur TLS
+    #[arg(long, env = "ENCJSON_CONJUR_CA_CERT_FILE", help_heading = "Key Resolution")]
+    conjur_ca_cert_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -144,6 +167,36 @@ struct KeySourceRuntimeConfig {
     conjur_ca_cert_file: Option<PathBuf>,
 }
 
+fn source_cfg_from_resolve_args(args: &ResolveArgs) -> KeySourceRuntimeConfig {
+    KeySourceRuntimeConfig {
+        key_source: args.key_source.clone(),
+        remote_keys_url: args.remote_keys_url.clone(),
+        remote_tls_cert_file: args.remote_tls_cert_file.clone(),
+        remote_tls_key_file: args.remote_tls_key_file.clone(),
+        remote_tls_ca_file: args.remote_tls_ca_file.clone(),
+        vault_addr: args.vault_addr.clone(),
+        vault_path: args.vault_path.clone(),
+        vault_token: args.vault_token.clone(),
+        vault_public_field: args.vault_public_field.clone(),
+        vault_private_field: args.vault_private_field.clone(),
+        conjur_appliance_url: args.conjur_appliance_url.clone(),
+        conjur_account: args.conjur_account.clone(),
+        conjur_authn_login: args.conjur_authn_login.clone(),
+        conjur_authn_api_key: args.conjur_authn_api_key.clone(),
+        conjur_public_variable_id: args.conjur_public_variable_id.clone(),
+        conjur_private_variable_id: args.conjur_private_variable_id.clone(),
+        conjur_ca_cert_file: args.conjur_ca_cert_file.clone(),
+    }
+}
+
+fn validate_scope_args(args: &ResolveArgs) -> Result<()> {
+    if args.scope_required {
+        require_policy_context(args.tenant.as_deref(), args.env_name.as_deref())
+            .map_err(|e| Error::Http(e.to_string()))?;
+    }
+    Ok(())
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Generate a new public/private key pair
@@ -167,27 +220,32 @@ enum Commands {
 
     /// Show key info for a secured JSON file (_public_key + resolved private key)
     Info {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
         /// Input file
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Optional positional input (e.g. path); conflicts with -f/--file
+        /// Optional positional input path
         #[arg(value_name = "INPUT", conflicts_with = "file")]
         input: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR")]
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
         keydir: Option<PathBuf>,
     },
 
     /// Encrypt all string values in a JSON file
     Encrypt {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
         /// Input file (otherwise reads from stdin)
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Optional positional input (e.g. "-" for stdin).
-        /// Conflicts with -f/--file to avoid ambiguity.
+        /// Optional positional input (use "-" for stdin)
         #[arg(value_name = "INPUT", conflicts_with = "file")]
         input: Option<PathBuf>,
 
@@ -196,7 +254,7 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR")]
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
         keydir: Option<PathBuf>,
     },
 
@@ -208,6 +266,9 @@ enum Commands {
     ///   -o shell               -> shell export lines
     ///   -o dot-env             -> .env file format
     Decrypt {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
         /// Input file (otherwise reads from stdin).
         ///
         /// You can also pass "-" as a positional argument to read from stdin:
@@ -215,8 +276,7 @@ enum Commands {
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Optional positional input (e.g. "-" for stdin).
-        /// Conflicts with -f/--file to avoid ambiguity.
+        /// Optional positional input (use "-" for stdin)
         #[arg(value_name = "INPUT", conflicts_with = "file")]
         input: Option<PathBuf>,
 
@@ -225,7 +285,7 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR")]
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
         keydir: Option<PathBuf>,
 
         /// Output format (json / shell / dot-env)
@@ -237,18 +297,27 @@ enum Commands {
         debug: bool,
 
         /// Return only one concrete value from `environment` / `env` object (raw value to stdout)
-        #[arg(long = "env-name", conflicts_with = "write")]
-        env_name: Option<String>,
+        #[arg(long = "env-name", value_name = "NAME", conflicts_with = "write")]
+        env_value_name: Option<String>,
+    },
+
+    /// Manage virtual filesystem assets stored in JSON bundles
+    Assets {
+        #[command(subcommand)]
+        command: AssetsCommand,
     },
 
     /// (Deprecated) shortcut for `decrypt -o shell`
     Env {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
         /// Input file (otherwise reads from stdin)
         #[arg(short, long)]
         file: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR")]
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
         keydir: Option<PathBuf>,
 
         /// Print expansion trace to stderr (use RUST_LOG=debug to see it)
@@ -259,11 +328,14 @@ enum Commands {
     /// Decrypt file and render Kubernetes Secret YAML (with optional sidecar schema transforms)
     #[command(name = "render-k8s-secret")]
     RenderK8sSecret {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
         /// Input file
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Optional positional input (e.g. path); conflicts with -f/--file
+        /// Optional positional input path
         #[arg(value_name = "INPUT", conflicts_with = "file")]
         input: Option<PathBuf>,
 
@@ -292,18 +364,21 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR")]
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
         keydir: Option<PathBuf>,
     },
 
     /// Render Secret containing public/private key pair resolved from JSON _public_key
     #[command(name = "render-k8s-pair-secret")]
     RenderK8sPairSecret {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
         /// Input file
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Optional positional input (e.g. path); conflicts with -f/--file
+        /// Optional positional input path
         #[arg(value_name = "INPUT", conflicts_with = "file")]
         input: Option<PathBuf>,
 
@@ -328,7 +403,7 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR")]
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
         keydir: Option<PathBuf>,
     },
 
@@ -338,7 +413,7 @@ enum Commands {
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Optional positional input (kept for symmetry; not valid for UI)
+        /// Optional positional input path
         #[arg(value_name = "INPUT", conflicts_with = "file")]
         input: Option<PathBuf>,
 
@@ -357,6 +432,9 @@ enum Commands {
 
     /// Set (upsert) a key in `environment`/`env` for CI/CD automation
     Set {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
         /// Input file (required for reliable automation)
         #[arg(short, long)]
         file: Option<PathBuf>,
@@ -378,12 +456,15 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR")]
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
         keydir: Option<PathBuf>,
     },
 
     /// Remove a key from `environment`/`env` for CI/CD automation
     Unset {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
         /// Input file (required for reliable automation)
         #[arg(short, long)]
         file: Option<PathBuf>,
@@ -397,18 +478,21 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR")]
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
         keydir: Option<PathBuf>,
     },
 
     /// Rotate file encryption key (decrypt -> replace _public_key -> encrypt)
     #[command(name = "rotate-key", alias = "rekey", alias = "migrate-key")]
     RotateKey {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
         /// Input file
         #[arg(short, long)]
         file: Option<PathBuf>,
 
-        /// Optional positional input (e.g. path); conflicts with -f/--file
+        /// Optional positional input path
         #[arg(value_name = "INPUT", conflicts_with = "file")]
         input: Option<PathBuf>,
 
@@ -417,7 +501,7 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR")]
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
         keydir: Option<PathBuf>,
     },
 
@@ -508,6 +592,9 @@ enum Commands {
     },
 
     Login {
+        #[arg(long, default_value_t = false)]
+        insecure: bool,
+
         #[arg(long, required = true)]
         url: String,
         #[arg(long, default_value = "cli-tools")]
@@ -531,6 +618,113 @@ enum Commands {
 }
 
 #[derive(Subcommand, Debug)]
+enum AssetsCommand {
+    /// List files stored in assets bundle
+    List {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
+        /// Input file
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+
+        /// Optional positional input path
+        #[arg(value_name = "INPUT", conflicts_with = "file")]
+        input: Option<PathBuf>,
+
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        keydir: Option<PathBuf>,
+    },
+
+    /// Get one file from assets bundle
+    Get {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
+        /// Input file
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+
+        /// Optional positional input path
+        #[arg(value_name = "INPUT", conflicts_with = "file")]
+        input: Option<PathBuf>,
+
+        /// Asset path inside virtual filesystem
+        #[arg(long)]
+        path: String,
+
+        /// Print base64 value instead of raw bytes
+        #[arg(long, default_value_t = false)]
+        base64: bool,
+
+        /// Optional output file (default stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        keydir: Option<PathBuf>,
+    },
+
+    /// Export all files from assets bundle into directory
+    Export {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
+        /// Input file
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+
+        /// Optional positional input path
+        #[arg(value_name = "INPUT", conflicts_with = "file")]
+        input: Option<PathBuf>,
+
+        /// Output directory
+        #[arg(long)]
+        out_dir: PathBuf,
+
+        /// Overwrite existing files
+        #[arg(long, default_value_t = false)]
+        overwrite: bool,
+
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        keydir: Option<PathBuf>,
+    },
+
+    /// Import files from directory into assets bundle
+    Import {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
+        /// Source directory to pack
+        #[arg(long)]
+        from_dir: PathBuf,
+
+        /// Output JSON file
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Create or update secured assets bundle
+        #[arg(long, conflicts_with = "unsecured")]
+        secured: bool,
+
+        /// Create or update unsecured assets bundle
+        #[arg(long, conflicts_with = "secured")]
+        unsecured: bool,
+
+        /// Public key for new secured bundle
+        #[arg(long)]
+        public_key: Option<String>,
+
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        keydir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum SessionsCommand {
     #[command(alias = "ls")]
     List,
@@ -550,122 +744,108 @@ fn main() {
     }
 
     if let Some(cmd) = cli.command {
-        if cli.scope_required
-            && let Err(e) = require_policy_context(cli.tenant.as_deref(), cli.env_name.as_deref()) {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
-        let source_cfg = KeySourceRuntimeConfig {
-            key_source: cli.key_source.clone(),
-            remote_keys_url: cli.remote_keys_url.clone(),
-            remote_tls_cert_file: cli.remote_tls_cert_file.clone(),
-            remote_tls_key_file: cli.remote_tls_key_file.clone(),
-            remote_tls_ca_file: cli.remote_tls_ca_file.clone(),
-            vault_addr: cli.vault_addr.clone(),
-            vault_path: cli.vault_path.clone(),
-            vault_token: cli.vault_token.clone(),
-            vault_public_field: cli.vault_public_field.clone(),
-            vault_private_field: cli.vault_private_field.clone(),
-            conjur_appliance_url: cli.conjur_appliance_url.clone(),
-            conjur_account: cli.conjur_account.clone(),
-            conjur_authn_login: cli.conjur_authn_login.clone(),
-            conjur_authn_api_key: cli.conjur_authn_api_key.clone(),
-            conjur_public_variable_id: cli.conjur_public_variable_id.clone(),
-            conjur_private_variable_id: cli.conjur_private_variable_id.clone(),
-            conjur_ca_cert_file: cli.conjur_ca_cert_file.clone(),
-        };
-        if let Err(e) = run(
-            cmd,
-            cli.insecure.unwrap_or(false),
-            cli.private_key.clone(),
-            source_cfg,
-            cli.legacy_mode,
-        ) {
+        if let Err(e) = run(cmd) {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
     }
 }
 
-fn run(
-    command: Commands,
-    insecure: bool,
-    private_key: Option<String>,
-    source_cfg: KeySourceRuntimeConfig,
-    legacy_mode: bool,
-) -> Result<()> {
+fn run(command: Commands) -> Result<()> {
     match command {
         Commands::Init {
             keydir,
             create_file,
         } => cmd_init(keydir, create_file),
         Commands::List { keydir } => cmd_list(keydir),
-        Commands::Info { file, input, keydir } => cmd_info(
-            FileInput { file, input },
-            &ResolveCtx {
+        Commands::Info {
+            resolve,
+            file,
+            input,
+            keydir,
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
                 keydir,
-                private_key: private_key.as_deref(),
+                private_key: resolve.private_key.as_deref(),
                 source_cfg: &source_cfg,
-                legacy_mode,
-            },
-        ),
+                legacy_mode: resolve.legacy_mode,
+            };
+            cmd_info(FileInput { file, input }, &ctx)
+        }
         Commands::Encrypt {
+            resolve,
             file,
             input,
             write,
             keydir,
-        } => cmd_encrypt(
-            FileInput { file, input },
-            write,
-            &ResolveCtx {
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
                 keydir,
-                private_key: private_key.as_deref(),
+                private_key: resolve.private_key.as_deref(),
                 source_cfg: &source_cfg,
-                legacy_mode,
-            },
-            true,
-        ),
+                legacy_mode: resolve.legacy_mode,
+            };
+            cmd_encrypt(FileInput { file, input }, write, &ctx, true)
+        }
         Commands::Decrypt {
+            resolve,
             file,
             input,
             write,
             keydir,
             output,
             debug,
-            env_name,
-        } => cmd_decrypt(
-            FileInput { file, input },
-            write,
-            output,
-            debug,
-            env_name,
-            &ResolveCtx {
+            env_value_name,
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
                 keydir,
-                private_key: private_key.as_deref(),
+                private_key: resolve.private_key.as_deref(),
                 source_cfg: &source_cfg,
-                legacy_mode,
-            },
-            true,
-        ),
+                legacy_mode: resolve.legacy_mode,
+            };
+            cmd_decrypt(
+                FileInput { file, input },
+                write,
+                output,
+                debug,
+                env_value_name,
+                &ctx,
+                true,
+            )
+        }
         Commands::Env {
+            resolve,
             file,
             keydir,
             debug,
-        } => cmd_decrypt(
-            FileInput { file, input: None },
-            false,
-            OutputFormat::Shell,
-            debug,
-            None,
-            &ResolveCtx {
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
                 keydir,
-                private_key: private_key.as_deref(),
+                private_key: resolve.private_key.as_deref(),
                 source_cfg: &source_cfg,
-                legacy_mode,
-            },
-            false,
-        ),
+                legacy_mode: resolve.legacy_mode,
+            };
+            cmd_decrypt(
+                FileInput { file, input: None },
+                false,
+                OutputFormat::Shell,
+                debug,
+                None,
+                &ctx,
+                false,
+            )
+        }
+        Commands::Assets { command } => cmd_assets(command),
         Commands::RenderK8sSecret {
+            resolve,
             file,
             input,
             name,
@@ -675,24 +855,30 @@ fn run(
             from_env_secret,
             output,
             keydir,
-        } => cmd_render_k8s_secret(
-            FileInput { file, input },
-            RenderK8sSecretOptions {
-                name,
-                namespace,
-                secret_type,
-                from_env,
-                from_env_secret,
-                output,
-            },
-            &ResolveCtx {
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
                 keydir,
-                private_key: private_key.as_deref(),
+                private_key: resolve.private_key.as_deref(),
                 source_cfg: &source_cfg,
-                legacy_mode,
-            },
-        ),
+                legacy_mode: resolve.legacy_mode,
+            };
+            cmd_render_k8s_secret(
+                FileInput { file, input },
+                RenderK8sSecretOptions {
+                    name,
+                    namespace,
+                    secret_type,
+                    from_env,
+                    from_env_secret,
+                    output,
+                },
+                &ctx,
+            )
+        }
         Commands::RenderK8sPairSecret {
+            resolve,
             file,
             input,
             name,
@@ -701,20 +887,25 @@ fn run(
             private_key_name,
             output,
             keydir,
-        } => cmd_render_k8s_pair_secret(
-            FileInput { file, input },
-            name,
-            namespace,
-            public_key_name,
-            private_key_name,
-            output,
-            &ResolveCtx {
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
                 keydir,
-                private_key: private_key.as_deref(),
+                private_key: resolve.private_key.as_deref(),
                 source_cfg: &source_cfg,
-                legacy_mode,
-            },
-        ),
+                legacy_mode: resolve.legacy_mode,
+            };
+            cmd_render_k8s_pair_secret(
+                FileInput { file, input },
+                name,
+                namespace,
+                public_key_name,
+                private_key_name,
+                output,
+                &ctx,
+            )
+        }
         Commands::Edit {
             file,
             input,
@@ -723,56 +914,65 @@ fn run(
             web,
         } => cmd_edit(file, input, keydir, ui, web),
         Commands::Set {
+            resolve,
             file,
             key,
             value,
             json_value,
             write,
             keydir,
-        } => cmd_set(
-            FileInput { file, input: None },
-            key,
-            value,
-            json_value,
-            write,
-            &ResolveCtx {
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
                 keydir,
-                private_key: private_key.as_deref(),
+                private_key: resolve.private_key.as_deref(),
                 source_cfg: &source_cfg,
-                legacy_mode,
-            },
-        ),
+                legacy_mode: resolve.legacy_mode,
+            };
+            cmd_set(
+                FileInput { file, input: None },
+                key,
+                value,
+                json_value,
+                write,
+                &ctx,
+            )
+        }
         Commands::Unset {
+            resolve,
             file,
             key,
             write,
             keydir,
-        } => cmd_unset(
-            FileInput { file, input: None },
-            key,
-            write,
-            &ResolveCtx {
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
                 keydir,
-                private_key: private_key.as_deref(),
+                private_key: resolve.private_key.as_deref(),
                 source_cfg: &source_cfg,
-                legacy_mode,
-            },
-        ),
+                legacy_mode: resolve.legacy_mode,
+            };
+            cmd_unset(FileInput { file, input: None }, key, write, &ctx)
+        }
         Commands::RotateKey {
+            resolve,
             file,
             input,
             write,
             keydir,
-        } => cmd_rekey(
-            FileInput { file, input },
-            write,
-            &ResolveCtx {
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
                 keydir,
-                private_key: private_key.as_deref(),
+                private_key: resolve.private_key.as_deref(),
                 source_cfg: &source_cfg,
-                legacy_mode,
-            },
-        ),
+                legacy_mode: resolve.legacy_mode,
+            };
+            cmd_rekey(FileInput { file, input }, write, &ctx)
+        }
         Commands::Register {
             public_hex,
             keys_url,
@@ -785,26 +985,30 @@ fn run(
             private_key_fd,
             private_key_stdin,
             allow_insecure_cli_private_key,
-        } => cmd_register(
-            RegisterCommand {
-                public_hex,
-                keys_url,
-                token,
-                tenant,
-                note,
-                tags: tag,
-                private_key_file,
-                private_key_fd,
-                private_key_stdin,
-                allow_insecure_cli_private_key,
-            },
-            &ResolveCtx {
+        } => {
+            let source_cfg = KeySourceRuntimeConfig::default();
+            let ctx = ResolveCtx {
                 keydir,
-                private_key: private_key.as_deref(),
+                private_key: None,
                 source_cfg: &source_cfg,
-                legacy_mode,
-            },
-        ),
+                legacy_mode: true,
+            };
+            cmd_register(
+                RegisterCommand {
+                    public_hex,
+                    keys_url,
+                    token,
+                    tenant,
+                    note,
+                    tags: tag,
+                    private_key_file,
+                    private_key_fd,
+                    private_key_stdin,
+                    allow_insecure_cli_private_key,
+                },
+                &ctx,
+            )
+        }
         Commands::Sync {
             file,
             key,
@@ -818,6 +1022,7 @@ fn run(
             dry_run,
         } => cmd_sync_dir(src_dir, dst_dir, dry_run),
         Commands::Login {
+            insecure,
             url,
             client,
             port,
@@ -1094,6 +1299,32 @@ struct RenderK8sSecretOptions {
     from_env: Vec<String>,
     from_env_secret: Vec<String>,
     output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct AssetsBundle {
+    public_key: Option<String>,
+    assets: BTreeMap<String, AssetEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum AssetKind {
+    Text,
+    Binary,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct AssetEntry {
+    content: String,
+    #[serde(default)]
+    kind: Option<AssetKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetImportMode {
+    Secured,
+    Unsecured,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1641,6 +1872,396 @@ fn cmd_decrypt(
             Ok(())
         }
     }
+}
+
+fn cmd_assets(
+    command: AssetsCommand,
+) -> Result<()> {
+    match command {
+        AssetsCommand::List {
+            resolve,
+            file,
+            input,
+            keydir,
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
+                keydir,
+                private_key: resolve.private_key.as_deref(),
+                source_cfg: &source_cfg,
+                legacy_mode: resolve.legacy_mode,
+            };
+            let bundle = load_assets_bundle(
+                FileInput { file, input },
+                &ctx,
+            )?;
+            for path in bundle.assets.keys() {
+                println!("{path}");
+            }
+            Ok(())
+        }
+        AssetsCommand::Get {
+            resolve,
+            file,
+            input,
+            path,
+            base64,
+            output,
+            keydir,
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
+                keydir,
+                private_key: resolve.private_key.as_deref(),
+                source_cfg: &source_cfg,
+                legacy_mode: resolve.legacy_mode,
+            };
+            let bundle = load_assets_bundle(
+                FileInput { file, input },
+                &ctx,
+            )?;
+            let value = bundle.assets.get(&path).ok_or_else(|| {
+                Error::Http(format!("asset path '{}' not found in assets bundle", path))
+            })?;
+            if base64 {
+                if let Some(output) = output {
+                    fs::write(output, value.content.as_bytes())?;
+                } else {
+                    print!("{}", value.content);
+                }
+                return Ok(());
+            }
+            let bytes = decode_asset_base64(&path, &value.content)?;
+            write_asset_output(output.as_ref(), &bytes)
+        }
+        AssetsCommand::Export {
+            resolve,
+            file,
+            input,
+            out_dir,
+            overwrite,
+            keydir,
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
+                keydir,
+                private_key: resolve.private_key.as_deref(),
+                source_cfg: &source_cfg,
+                legacy_mode: resolve.legacy_mode,
+            };
+            let bundle = load_assets_bundle(
+                FileInput { file, input },
+                &ctx,
+            )?;
+            export_assets_bundle(&bundle, &out_dir, overwrite)
+        }
+        AssetsCommand::Import {
+            resolve,
+            from_dir,
+            output,
+            secured,
+            unsecured,
+            public_key,
+            keydir,
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
+                keydir,
+                private_key: resolve.private_key.as_deref(),
+                source_cfg: &source_cfg,
+                legacy_mode: resolve.legacy_mode,
+            };
+            let mode = match (secured, unsecured) {
+                (true, false) => AssetImportMode::Secured,
+                (false, true) => AssetImportMode::Unsecured,
+                (false, false) => infer_asset_import_mode(&output)?,
+                (true, true) => unreachable!(),
+            };
+            import_assets_bundle(
+                &from_dir,
+                &output,
+                mode,
+                public_key,
+                &ctx,
+            )
+        }
+    }
+}
+
+fn infer_asset_import_mode(output: &Path) -> Result<AssetImportMode> {
+    let name = output
+        .file_name()
+        .and_then(|v| v.to_str())
+        .ok_or_else(|| Error::Http(format!("invalid output path '{}'", output.display())))?;
+    if name.ends_with(".secured.json") {
+        return Ok(AssetImportMode::Secured);
+    }
+    if name.ends_with(".unsecured.json") {
+        return Ok(AssetImportMode::Unsecured);
+    }
+    Err(Error::Http(
+        "cannot infer asset bundle mode; use --secured or --unsecured, or output *.secured.json / *.unsecured.json"
+            .to_string(),
+    ))
+}
+
+fn load_assets_bundle(input: FileInput, ctx: &ResolveCtx<'_>) -> Result<AssetsBundle> {
+    let effective_path = input.file.or(input.input);
+    let mut root = read_json(effective_path.as_ref())?;
+
+    let public_key = match extract_public_key(&root) {
+        Ok(public_key_hex) => {
+            let public_key_hex = public_key_hex.to_string();
+            let resolved = resolve_private_key_for_public(&public_key_hex, ctx)?;
+            let sb = SecureBox::new_from_hex(&resolved.private_hex, &public_key_hex)?;
+            transform_json(&mut root, &sb, TransformMode::Decrypt)?;
+            Some(public_key_hex)
+        }
+        Err(Error::MissingPublicKey) => None,
+        Err(e) => return Err(e),
+    };
+
+    parse_assets_bundle(&root).map(|assets| AssetsBundle { public_key, assets })
+}
+
+fn parse_assets_bundle(root: &Value) -> Result<BTreeMap<String, AssetEntry>> {
+    let obj = root
+        .get("assets")
+        .and_then(Value::as_object)
+        .ok_or_else(|| Error::Http("missing assets object".to_string()))?;
+    let mut out = BTreeMap::new();
+    for (path, value) in obj {
+        validate_asset_path(path)?;
+        let entry = if let Some(content) = value.as_str() {
+            AssetEntry {
+                content: content.to_string(),
+                kind: None,
+            }
+        } else {
+            serde_json::from_value::<AssetEntry>(value.clone()).map_err(|e| {
+                Error::Http(format!("asset '{}' must be stored as object {{content, kind}}: {e}", path))
+            })?
+        };
+        out.insert(path.clone(), entry);
+    }
+    Ok(out)
+}
+
+fn validate_asset_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        return Err(Error::Http("asset path must not be empty".to_string()));
+    }
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return Err(Error::Http(format!("asset path '{}' must be relative", path)));
+    }
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(Error::Http(format!(
+            "asset path '{}' must not contain '..'",
+            path
+        )));
+    }
+    Ok(())
+}
+
+fn decode_asset_base64(path: &str, value: &str) -> Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(value.trim())
+        .map_err(|e| Error::Http(format!("base64 decode failed for asset '{}': {e}", path)))
+}
+
+fn asset_kind_from_bytes(bytes: &[u8]) -> AssetKind {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => {
+            let printable = text.chars().all(|ch| {
+                ch == '\n' || ch == '\r' || ch == '\t' || (!ch.is_control())
+            });
+            if printable {
+                AssetKind::Text
+            } else {
+                AssetKind::Binary
+            }
+        }
+        Err(_) => AssetKind::Binary,
+    }
+}
+
+fn effective_asset_kind(entry: &AssetEntry) -> AssetKind {
+    entry.kind.unwrap_or_else(|| {
+        decode_asset_base64("<detect>", &entry.content)
+            .map(|bytes| asset_kind_from_bytes(&bytes))
+            .unwrap_or(AssetKind::Binary)
+    })
+}
+
+fn write_asset_output(output: Option<&PathBuf>, bytes: &[u8]) -> Result<()> {
+    if let Some(output) = output {
+        fs::write(output, bytes)?;
+    } else {
+        io::stdout().write_all(bytes)?;
+    }
+    Ok(())
+}
+
+fn export_assets_bundle(bundle: &AssetsBundle, out_dir: &Path, overwrite: bool) -> Result<()> {
+    fs::create_dir_all(out_dir)?;
+    for (path, entry) in &bundle.assets {
+        let bytes = decode_asset_base64(path, &entry.content)?;
+        let target = out_dir.join(path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if target.exists() && !overwrite {
+            return Err(Error::Http(format!(
+                "target '{}' already exists; use --overwrite",
+                target.display()
+            )));
+        }
+        fs::write(target, bytes)?;
+    }
+    Ok(())
+}
+
+fn import_assets_bundle(
+    from_dir: &Path,
+    output: &Path,
+    mode: AssetImportMode,
+    public_key: Option<String>,
+    ctx: &ResolveCtx<'_>,
+) -> Result<()> {
+    if !from_dir.is_dir() {
+        return Err(Error::Http(format!(
+            "source directory '{}' does not exist or is not a directory",
+            from_dir.display()
+        )));
+    }
+
+    let mut assets = BTreeMap::new();
+    collect_assets_from_dir(from_dir, from_dir, &mut assets)?;
+
+    let mut root = if output.exists() {
+        read_json(Some(&output.to_path_buf()))?
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
+
+    let effective_public = match mode {
+        AssetImportMode::Secured => {
+            let existing_public = match extract_public_key(&root) {
+                Ok(v) => Some(v.to_string()),
+                Err(Error::MissingPublicKey) => None,
+                Err(e) => return Err(e),
+            };
+            match (existing_public, public_key) {
+                (Some(existing), Some(provided)) => {
+                    if existing != provided {
+                        return Err(Error::Http(format!(
+                            "provided --public-key does not match existing _public_key in '{}'",
+                            output.display()
+                        )));
+                    }
+                    Some(existing)
+                }
+                (Some(existing), None) => Some(existing),
+                (None, Some(provided)) => Some(provided),
+                (None, None) => {
+                    return Err(Error::Http(
+                        "--public-key is required when creating a new secured assets bundle"
+                            .to_string(),
+                    ))
+                }
+            }
+        }
+        AssetImportMode::Unsecured => None,
+    };
+
+    let mut map = serde_json::Map::new();
+    if let Some(public) = effective_public.as_ref() {
+        map.insert("_public_key".to_string(), Value::String(public.clone()));
+    }
+    map.insert(
+        "assets".to_string(),
+        Value::Object(
+            assets
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::to_value(v).unwrap_or(Value::Null)))
+                .collect(),
+        ),
+    );
+    root = Value::Object(map);
+
+    if let Some(public_key_hex) = effective_public.as_ref() {
+        let resolved = resolve_private_key_for_public(public_key_hex, ctx)?;
+        let sb = SecureBox::new_from_hex(&resolved.private_hex, public_key_hex)?;
+        encrypt_assets_bundle_contents(&mut root, &sb)?;
+    }
+
+    fs::write(output, serde_json::to_string_pretty(&root)?)?;
+    Ok(())
+}
+
+fn encrypt_assets_bundle_contents(root: &mut Value, sb: &SecureBox) -> Result<()> {
+    let Some(assets) = root.get_mut("assets").and_then(Value::as_object_mut) else {
+        return Err(Error::Http("missing assets object".to_string()));
+    };
+    for value in assets.values_mut() {
+        let Some(obj) = value.as_object_mut() else {
+            continue;
+        };
+        let Some(content) = obj.get_mut("content") else {
+            continue;
+        };
+        match content {
+            Value::String(s) => {
+                *s = sb.encrypt_value(s).map_err(Error::Crypto)?;
+            }
+            other => {
+                transform_json(other, sb, TransformMode::Encrypt)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_assets_from_dir(
+    root: &Path,
+    current: &Path,
+    assets: &mut BTreeMap<String, AssetEntry>,
+) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_assets_from_dir(root, &path, assets)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|e| Error::Http(format!("failed to compute relative path: {e}")))?;
+        let rel_string = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        validate_asset_path(&rel_string)?;
+        let bytes = fs::read(&path)?;
+        assets.insert(
+            rel_string,
+            AssetEntry {
+                content: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                kind: Some(asset_kind_from_bytes(&bytes)),
+            },
+        );
+    }
+    Ok(())
 }
 
 fn get_env_value_raw(root: &Value, env_name: &str) -> Result<String> {
@@ -2329,6 +2950,79 @@ mod tests {
     }
 
     #[test]
+    fn parse_assets_list_accepts_short_keydir() {
+        let cli = Cli::parse_from(["encjson", "assets", "list", "-k", "keys-dir", "-f", "assets.secured.json"]);
+        match cli.command {
+            Some(Commands::Assets {
+                command: AssetsCommand::List { keydir, .. },
+            }) => {
+                assert_eq!(keydir, Some(PathBuf::from("keys-dir")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_assets_get_accepts_options() {
+        let cli = Cli::parse_from([
+            "encjson",
+            "assets",
+            "get",
+            "-f",
+            "assets.secured.json",
+            "--path",
+            "ssl/private-key.pem",
+            "--base64",
+            "-o",
+            "out.pem.b64",
+        ]);
+        match cli.command {
+            Some(Commands::Assets {
+                command: AssetsCommand::Get { path, base64, output, .. },
+            }) => {
+                assert_eq!(path, "ssl/private-key.pem");
+                assert!(base64);
+                assert_eq!(output, Some(PathBuf::from("out.pem.b64")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_assets_import_accepts_secured_mode() {
+        let cli = Cli::parse_from([
+            "encjson",
+            "assets",
+            "import",
+            "--from-dir",
+            "assets",
+            "-o",
+            "assets.secured.json",
+            "--secured",
+            "--public-key",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ]);
+        match cli.command {
+            Some(Commands::Assets {
+                command: AssetsCommand::Import {
+                    secured,
+                    unsecured,
+                    public_key,
+                    ..
+                },
+            }) => {
+                assert!(secured);
+                assert!(!unsecured);
+                assert_eq!(
+                    public_key.as_deref(),
+                    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_env_accepts_short_keydir() {
         let cli = Cli::parse_from(["encjson", "env", "-k", "keys-dir"]);
         match cli.command {
@@ -2562,22 +3256,28 @@ mod tests {
     fn parse_global_scope_options() {
         let cli = Cli::parse_from([
             "encjson",
+            "decrypt",
             "--scope-required",
             "--tenant",
             "tsm",
             "--env",
             "test",
-            "list",
         ]);
-        assert!(cli.scope_required);
-        assert_eq!(cli.tenant.as_deref(), Some("tsm"));
-        assert_eq!(cli.env_name.as_deref(), Some("test"));
+        match cli.command {
+            Some(Commands::Decrypt { resolve, .. }) => {
+                assert!(resolve.scope_required);
+                assert_eq!(resolve.tenant.as_deref(), Some("tsm"));
+                assert_eq!(resolve.env_name.as_deref(), Some("test"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
     fn parse_global_conjur_key_source_options() {
         let cli = Cli::parse_from([
             "encjson",
+            "decrypt",
             "--key-source",
             "conjur",
             "--conjur-appliance-url",
@@ -2592,13 +3292,17 @@ mod tests {
             "data/encjson/public",
             "--conjur-private-variable-id",
             "data/encjson/private",
-            "list",
         ]);
-        assert!(matches!(cli.key_source, Some(KeySourceCli::Conjur)));
-        assert_eq!(
-            cli.conjur_appliance_url.as_deref(),
-            Some("https://conjur.example.com")
-        );
+        match cli.command {
+            Some(Commands::Decrypt { resolve, .. }) => {
+                assert!(matches!(resolve.key_source, Some(KeySourceCli::Conjur)));
+                assert_eq!(
+                    resolve.conjur_appliance_url.as_deref(),
+                    Some("https://conjur.example.com")
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
@@ -2809,6 +3513,357 @@ mod tests {
 
         let _ = fs::remove_file(path);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn assets_unsecured_import_and_load_roundtrip() {
+        let src_dir = unique_path("assets-import-unsecured-src", "");
+        let out_file = unique_path("assets-import-unsecured-out", ".unsecured.json");
+        fs::create_dir_all(src_dir.join("ssl")).unwrap();
+        fs::write(src_dir.join("ssl").join("cert.pem"), b"plain-cert").unwrap();
+
+        let source_cfg = empty_source_cfg();
+        import_assets_bundle(
+            &src_dir,
+            &out_file,
+            AssetImportMode::Unsecured,
+            None,
+            &ResolveCtx {
+                keydir: None,
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let bundle = load_assets_bundle(
+            FileInput {
+                file: Some(out_file.clone()),
+                input: None,
+            },
+            &ResolveCtx {
+                keydir: None,
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+        assert!(bundle.public_key.is_none());
+        let bytes = decode_asset_base64(
+            "ssl/cert.pem",
+            &bundle.assets.get("ssl/cert.pem").unwrap().content,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"plain-cert");
+        assert_eq!(
+            effective_asset_kind(bundle.assets.get("ssl/cert.pem").unwrap()),
+            AssetKind::Text
+        );
+
+        let _ = fs::remove_file(out_file);
+        let _ = fs::remove_dir_all(src_dir);
+    }
+
+    #[test]
+    fn assets_secured_import_uses_existing_public_key() {
+        let src_dir = unique_path("assets-import-secured-src", "");
+        let out_file = unique_path("assets-import-secured-out", ".secured.json");
+        let key_dir = unique_path("assets-import-secured-keys", "");
+        fs::create_dir_all(src_dir.join("ssl")).unwrap();
+        fs::create_dir_all(&key_dir).unwrap();
+        fs::write(src_dir.join("ssl").join("private-key.pem"), b"super-secret").unwrap();
+
+        let (private_hex, public_hex) = generate_pair_consistent_key_pair();
+        save_private_key(&public_hex, &private_hex, Some(&key_dir)).unwrap();
+
+        let source_cfg = empty_source_cfg();
+        import_assets_bundle(
+            &src_dir,
+            &out_file,
+            AssetImportMode::Secured,
+            Some(public_hex.clone()),
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let root: Value = serde_json::from_str(&fs::read_to_string(&out_file).unwrap()).unwrap();
+        assert_eq!(
+            root.get("_public_key").and_then(Value::as_str),
+            Some(public_hex.as_str())
+        );
+            let stored = root
+                .get("assets")
+                .and_then(Value::as_object)
+                .unwrap()
+                .get("ssl/private-key.pem")
+                .and_then(Value::as_object)
+                .and_then(|v| v.get("content"))
+                .and_then(Value::as_str)
+                .unwrap();
+        assert!(stored.starts_with("EncJson[@api=2.0:@box="));
+        assert_eq!(
+            root.get("assets")
+                .and_then(Value::as_object)
+                .unwrap()
+                .get("ssl/private-key.pem")
+                .and_then(Value::as_object)
+                .and_then(|v| v.get("kind"))
+                .and_then(Value::as_str),
+            Some("text")
+        );
+
+        fs::write(src_dir.join("ssl").join("private-key.pem"), b"super-secret-2").unwrap();
+        import_assets_bundle(
+            &src_dir,
+            &out_file,
+            AssetImportMode::Secured,
+            None,
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let bundle = load_assets_bundle(
+            FileInput {
+                file: Some(out_file.clone()),
+                input: None,
+            },
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+        let bytes = decode_asset_base64(
+            "ssl/private-key.pem",
+            &bundle.assets.get("ssl/private-key.pem").unwrap().content,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"super-secret-2");
+        assert_eq!(
+            effective_asset_kind(bundle.assets.get("ssl/private-key.pem").unwrap()),
+            AssetKind::Text
+        );
+
+        let _ = fs::remove_file(out_file);
+        let _ = fs::remove_dir_all(src_dir);
+        let _ = fs::remove_dir_all(key_dir);
+    }
+
+    #[test]
+    fn validate_asset_path_rejects_absolute_and_parent_paths() {
+        let err = validate_asset_path("/etc/passwd").unwrap_err();
+        assert!(err.to_string().contains("must be relative"));
+
+        let err = validate_asset_path("../secret.pem").unwrap_err();
+        assert!(err.to_string().contains("must not contain '..'"));
+    }
+
+    #[test]
+    fn infer_asset_import_mode_uses_output_suffix() {
+        assert!(matches!(
+            infer_asset_import_mode(Path::new("assets.secured.json")).unwrap(),
+            AssetImportMode::Secured
+        ));
+        assert!(matches!(
+            infer_asset_import_mode(Path::new("assets.unsecured.json")).unwrap(),
+            AssetImportMode::Unsecured
+        ));
+    }
+
+    #[test]
+    fn infer_asset_import_mode_rejects_unknown_suffix() {
+        let err = infer_asset_import_mode(Path::new("assets.json")).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cannot infer asset bundle mode"));
+    }
+
+    #[test]
+    fn export_assets_bundle_refuses_existing_file_without_overwrite() {
+        let out_dir = unique_path("assets-export-out", "");
+        fs::create_dir_all(out_dir.join("ssl")).unwrap();
+        fs::write(out_dir.join("ssl").join("cert.pem"), b"old").unwrap();
+
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            "ssl/cert.pem".to_string(),
+            AssetEntry {
+                content: base64::engine::general_purpose::STANDARD.encode(b"new"),
+                kind: Some(AssetKind::Text),
+            },
+        );
+        let bundle = AssetsBundle {
+            public_key: None,
+            assets,
+        };
+
+        let err = export_assets_bundle(&bundle, &out_dir, false).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+
+        let _ = fs::remove_dir_all(out_dir);
+    }
+
+    #[test]
+    fn export_assets_bundle_writes_decoded_bytes() {
+        let out_dir = unique_path("assets-export-write", "");
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            "ssl/cert.pem".to_string(),
+            AssetEntry {
+                content: base64::engine::general_purpose::STANDARD.encode(b"decoded-cert"),
+                kind: Some(AssetKind::Text),
+            },
+        );
+        let bundle = AssetsBundle {
+            public_key: None,
+            assets,
+        };
+
+        export_assets_bundle(&bundle, &out_dir, false).unwrap();
+
+        let bytes = fs::read(out_dir.join("ssl").join("cert.pem")).unwrap();
+        assert_eq!(bytes, b"decoded-cert");
+
+        let _ = fs::remove_dir_all(out_dir);
+    }
+
+    #[test]
+    fn assets_import_marks_binary_kind() {
+        let src_dir = unique_path("assets-import-binary-src", "");
+        let out_file = unique_path("assets-import-binary-out", ".unsecured.json");
+        fs::create_dir_all(src_dir.join("bin")).unwrap();
+        fs::write(src_dir.join("bin").join("logo.bin"), [0_u8, 159, 146, 150]).unwrap();
+
+        let source_cfg = empty_source_cfg();
+        import_assets_bundle(
+            &src_dir,
+            &out_file,
+            AssetImportMode::Unsecured,
+            None,
+            &ResolveCtx {
+                keydir: None,
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let bundle = load_assets_bundle(
+            FileInput {
+                file: Some(out_file.clone()),
+                input: None,
+            },
+            &ResolveCtx {
+                keydir: None,
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            effective_asset_kind(bundle.assets.get("bin/logo.bin").unwrap()),
+            AssetKind::Binary
+        );
+
+        let _ = fs::remove_file(out_file);
+        let _ = fs::remove_dir_all(src_dir);
+    }
+
+    #[test]
+    fn import_assets_bundle_requires_public_key_for_new_secured_bundle() {
+        let src_dir = unique_path("assets-import-secured-missing-key-src", "");
+        let out_file = unique_path("assets-import-secured-missing-key-out", ".secured.json");
+        fs::create_dir_all(src_dir.join("ssl")).unwrap();
+        fs::write(src_dir.join("ssl").join("private-key.pem"), b"super-secret").unwrap();
+
+        let source_cfg = empty_source_cfg();
+        let err = import_assets_bundle(
+            &src_dir,
+            &out_file,
+            AssetImportMode::Secured,
+            None,
+            &ResolveCtx {
+                keydir: None,
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("--public-key is required when creating a new secured assets bundle"));
+
+        let _ = fs::remove_file(out_file);
+        let _ = fs::remove_dir_all(src_dir);
+    }
+
+    #[test]
+    fn import_assets_bundle_rejects_mismatched_existing_public_key() {
+        let src_dir = unique_path("assets-import-secured-mismatch-src", "");
+        let out_file = unique_path("assets-import-secured-mismatch-out", ".secured.json");
+        let key_dir = unique_path("assets-import-secured-mismatch-keys", "");
+        fs::create_dir_all(src_dir.join("ssl")).unwrap();
+        fs::create_dir_all(&key_dir).unwrap();
+        fs::write(src_dir.join("ssl").join("private-key.pem"), b"super-secret").unwrap();
+
+        let (private_hex, public_hex) = generate_pair_consistent_key_pair();
+        save_private_key(&public_hex, &private_hex, Some(&key_dir)).unwrap();
+
+        let source_cfg = empty_source_cfg();
+        import_assets_bundle(
+            &src_dir,
+            &out_file,
+            AssetImportMode::Secured,
+            Some(public_hex.clone()),
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let (_, other_public_hex) = generate_pair_consistent_key_pair();
+        let err = import_assets_bundle(
+            &src_dir,
+            &out_file,
+            AssetImportMode::Secured,
+            Some(other_public_hex),
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("does not match existing _public_key"));
+
+        let _ = fs::remove_file(out_file);
+        let _ = fs::remove_dir_all(src_dir);
+        let _ = fs::remove_dir_all(key_dir);
     }
 
     #[test]

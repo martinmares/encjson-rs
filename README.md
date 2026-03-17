@@ -709,6 +709,47 @@ Supported values:
 - `encoding`: `plain` | `base64`
 - `normalize_line_endings`: `true` | `false`
 
+#### Virtual assets bundles
+
+`encjson` also supports virtual filesystem bundles stored in JSON:
+
+- `assets.unsecured.json`
+- `assets.secured.json`
+
+Format:
+
+```json
+{
+  "_public_key": "optional-for-secured-only",
+  "assets": {
+    "ssl/private-key.pem": "EncJson[@api=2.0:@box=...]",
+    "ssl/cert.pem": "EncJson[@api=2.0:@box=...]"
+  }
+}
+```
+
+For unsecured bundles, values in `assets` are plain base64 strings.  
+For secured bundles, values in `assets` are encrypted `EncJson[@api=2.0:...]` strings, where
+the decrypted plaintext is still base64.
+
+Available commands:
+
+```bash
+encjson assets list -f assets.secured.json
+encjson assets get -f assets.secured.json --path ssl/private-key.pem > private-key.pem
+encjson assets export -f assets.secured.json --out-dir ./out
+encjson assets import --from-dir ./assets -o assets.unsecured.json --unsecured
+encjson assets import --from-dir ./assets -o assets.secured.json --secured --public-key <HEX>
+```
+
+Notes:
+
+- asset paths must be relative
+- `..` is rejected
+- export fails on existing files unless `--overwrite` is used
+- for existing secured bundles, `assets import` reuses `_public_key`
+- `--public-key` is required only when creating a new secured bundle
+
 #### Render Kubernetes Secret YAML
 
 You can decrypt + apply sidecar schema transforms and directly render Kubernetes Secret YAML:
