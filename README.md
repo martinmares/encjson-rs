@@ -1095,6 +1095,65 @@ C:\Users\YourName\AppData\Roaming\encjson
 
 If you want complete control (for example, to share a key directory between WSL, Git Bash and native Windows binaries), set `ENCJSON_KEYDIR` explicitly on that machine.
 
+## Building static Linux binaries (musl)
+
+On macOS, plain:
+
+```bash
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+usually fails at the linker step, because the system `cc`/`ld` is a Darwin toolchain, not a Linux musl linker.
+
+Recommended approach: use `cargo-zigbuild`.
+
+Prerequisites:
+
+```bash
+brew install zig
+cargo install cargo-zigbuild
+```
+
+Build examples:
+
+```bash
+cargo zigbuild --release --bin encjson --target x86_64-unknown-linux-musl
+cargo zigbuild --release --bin encjson --target aarch64-unknown-linux-musl
+```
+
+The same approach also works for other binaries in this workspace, for example:
+
+```bash
+cargo zigbuild --release --bin encjson-keys-server --target x86_64-unknown-linux-musl
+```
+
+## Shell completion
+
+`encjson` and `encjson-keys-ctl` can generate shell completion scripts.
+
+Examples:
+
+```bash
+encjson completion zsh > ~/.zsh/completions/_encjson
+encjson-keys-ctl completion zsh > ~/.zsh/completions/_encjson-keys-ctl
+```
+
+Then make sure the directory is on `fpath` in `~/.zshrc`, for example:
+
+```bash
+fpath=(~/.zsh/completions $fpath)
+autoload -Uz compinit
+compinit
+```
+
+Supported shells:
+
+- `bash`
+- `zsh`
+- `fish`
+- `powershell`
+- `elvish`
+
 ### Migration from legacy `~/.encjson`
 
 On startup, if `~/.encjson` exists and the new dirs-based directory does not,

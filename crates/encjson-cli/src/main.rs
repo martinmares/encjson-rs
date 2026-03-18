@@ -1,7 +1,8 @@
 mod tui_edit;
 mod tui_register;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{Shell, generate};
 use base64::Engine as _;
 use serde_json::Value;
 use std::ffi::OsStr;
@@ -211,6 +212,12 @@ fn validate_scope_args(args: &ResolveArgs) -> Result<()> {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Generate shell completion script
+    Completion {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+
     /// Generate a new public/private key pair
     Init {
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
@@ -804,8 +811,24 @@ fn main() {
     }
 }
 
+fn current_bin_name(default_name: &str) -> String {
+    std::env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|arg0| Path::new(arg0).file_name())
+        .and_then(OsStr::to_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_name.to_string())
+}
+
 fn run(command: Commands) -> Result<()> {
     match command {
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            let bin_name = current_bin_name("encjson");
+            generate(shell, &mut cmd, bin_name, &mut io::stdout());
+            Ok(())
+        }
         Commands::Init {
             keydir,
             api,

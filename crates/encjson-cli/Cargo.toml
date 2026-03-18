@@ -1,6 +1,6 @@
 [package]
 name = "encjson-cli"
-version = "0.6.1"
+version = "0.6.6"
 edition = "2024"
 
 [[bin]]
@@ -16,6 +16,7 @@ anyhow = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 encjson-core = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

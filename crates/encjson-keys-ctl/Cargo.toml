@@ -1,6 +1,6 @@
 [package]
 name = "encjson-keys-ctl"
-version = "0.2.0"
+version = "0.6.6"
 edition = "2024"
 
 [[bin]]
@@ -11,5 +11,6 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 encjson-core = { workspace = true }
 tokio = { workspace = true }

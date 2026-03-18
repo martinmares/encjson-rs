@@ -1,6 +1,9 @@
 use anyhow::{anyhow, bail, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 use encjson_core::{key_sources::require_policy_context, oidc_session, tui_ctl};
+use std::ffi::OsStr;
+use std::path::Path;
 
 const APP_NAME: &str = "encjson-keys-ctl";
 
@@ -25,6 +28,10 @@ struct Cli {
 enum Commands {
     #[command(alias = "ui")]
     Tui,
+    Completion {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
     Login {
         #[arg(long, required = true)]
         url: String,
@@ -78,6 +85,11 @@ fn main() -> Result<()> {
             tui_ctl::run_ctl_ui_with_remote(keys_url, session.access_token)
                 .map_err(|err| anyhow!(err.to_string()))?;
         }
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            let bin_name = current_bin_name(APP_NAME);
+            generate(*shell, &mut cmd, bin_name, &mut std::io::stdout());
+        }
         Commands::Login {
             url,
             client,
@@ -108,6 +120,16 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn current_bin_name(default_name: &str) -> String {
+    std::env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|arg0| Path::new(arg0).file_name())
+        .and_then(OsStr::to_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| default_name.to_string())
 }
 
 fn run_async<F, T>(future: F) -> Result<T>
