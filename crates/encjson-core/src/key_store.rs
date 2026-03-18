@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use dirs::data_dir;
 
 use crate::error::Error;
+use crate::recipient::LocalKeyFileV3;
 use reqwest::blocking::Client;
 
 #[cfg(not(windows))]
@@ -128,6 +129,56 @@ pub fn save_private_key(
     Ok(path)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoredKeyMaterial {
+    LegacyPrivateHex(String),
+    V3Bundle(LocalKeyFileV3),
+}
+
+pub fn load_stored_key_material(
+    key_id: &str,
+    key_dir: Option<&Path>,
+) -> Result<StoredKeyMaterial, Error> {
+    let dir = key_dir.map(PathBuf::from).unwrap_or_else(default_key_dir);
+    let path = dir.join(key_id);
+    let content = fs::read_to_string(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Error::PrivateKeyNotFound(key_id.to_string())
+        } else {
+            Error::Io(e)
+        }
+    })?;
+    let trimmed = content.trim();
+
+    if trimmed.starts_with('{') {
+        let bundle: LocalKeyFileV3 = serde_json::from_str(trimmed)?;
+        return Ok(StoredKeyMaterial::V3Bundle(bundle));
+    }
+
+    Ok(StoredKeyMaterial::LegacyPrivateHex(trimmed.to_string()))
+}
+
+pub fn load_v3_key_bundle(key_id: &str, key_dir: Option<&Path>) -> Result<LocalKeyFileV3, Error> {
+    match load_stored_key_material(key_id, key_dir)? {
+        StoredKeyMaterial::LegacyPrivateHex(_) => Err(Error::InvalidRecipientMetadata(
+            format!("stored key `{key_id}` is a legacy private hex, not a v3 bundle"),
+        )),
+        StoredKeyMaterial::V3Bundle(bundle) => Ok(bundle),
+    }
+}
+
+pub fn save_v3_key_bundle(
+    bundle: &LocalKeyFileV3,
+    key_dir: Option<&Path>,
+) -> Result<PathBuf, Error> {
+    let dir = key_dir.map(PathBuf::from).unwrap_or_else(default_key_dir);
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(&bundle.key_id);
+    let payload = serde_json::to_string_pretty(bundle)?;
+    fs::write(&path, payload)?;
+    Ok(path)
+}
+
 /// List all public keys in the key directory.
 pub fn list_public_keys(key_dir: Option<&Path>) -> Result<Vec<String>, Error> {
     let dir = key_dir.map(PathBuf::from).unwrap_or_else(default_key_dir);
@@ -200,6 +251,7 @@ fn is_hex_key_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::generate_v3_key_bundle;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -288,5 +340,44 @@ mod tests {
         restore_env_var("ENCJSON_KEYDIR", prev_keydir);
         restore_env_var("ENCJSON_PRIVATE_KEY", prev_private);
         let _ = fs::remove_dir_all(&env_dir);
+    }
+
+    #[test]
+    fn save_and_load_v3_key_bundle_roundtrip() {
+        let dir = unique_temp_dir("v3-bundle");
+        fs::create_dir_all(&dir).unwrap();
+
+        let bundle = generate_v3_key_bundle().unwrap();
+        let path = save_v3_key_bundle(&bundle, Some(&dir)).unwrap();
+        let loaded = load_v3_key_bundle(&bundle.key_id, Some(&dir)).unwrap();
+
+        assert_eq!(path, dir.join(&bundle.key_id));
+        assert_eq!(loaded, bundle);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_stored_key_material_distinguishes_legacy_and_v3() {
+        let dir = unique_temp_dir("stored-material");
+        fs::create_dir_all(&dir).unwrap();
+
+        let legacy_key_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        fs::write(dir.join(legacy_key_id), "legacy-private").unwrap();
+
+        let bundle = generate_v3_key_bundle().unwrap();
+        save_v3_key_bundle(&bundle, Some(&dir)).unwrap();
+
+        match load_stored_key_material(legacy_key_id, Some(&dir)).unwrap() {
+            StoredKeyMaterial::LegacyPrivateHex(value) => assert_eq!(value, "legacy-private"),
+            other => panic!("expected legacy private hex, got {other:?}"),
+        }
+
+        match load_stored_key_material(&bundle.key_id, Some(&dir)).unwrap() {
+            StoredKeyMaterial::V3Bundle(loaded) => assert_eq!(loaded, bundle),
+            other => panic!("expected v3 bundle, got {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

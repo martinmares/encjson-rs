@@ -18,6 +18,15 @@ pub enum Error {
     #[error("Invalid _public_key format (expected 64 hex chars)")]
     InvalidPublicKey,
 
+    #[error("Missing recipient metadata (`_public_key` or `_recipient_key`) in JSON")]
+    MissingRecipientMetadata,
+
+    #[error("Invalid `_recipient_key`: {0}")]
+    InvalidRecipientMetadata(String),
+
+    #[error("Unsupported `_recipient_key` / api=3.0 path for this command: {0}")]
+    UnsupportedRecipientKey(String),
+
     #[error("Private key not found for public key {0}")]
     PrivateKeyNotFound(String),
 

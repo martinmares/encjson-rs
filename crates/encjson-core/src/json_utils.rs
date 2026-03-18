@@ -1,4 +1,4 @@
-use crate::crypto::{CryptoError, SecureBox};
+use crate::crypto::{CryptoError, HybridSecureBox, SecureBox};
 use serde_json::Value;
 use std::collections::HashMap;
 use tracing::debug;
@@ -10,36 +10,54 @@ pub enum TransformMode {
 }
 
 /// Recursively walk JSON and encrypt/decrypt only String values.
-/// `_public_key` is always left untouched.
+/// Reserved metadata blocks (`_public_key`, `_recipient_key`) are always left untouched.
 pub fn transform_json(
     v: &mut Value,
     sb: &SecureBox,
     mode: TransformMode,
 ) -> Result<(), CryptoError> {
+    transform_json_with(v, &|s| match mode {
+        TransformMode::Encrypt => sb.encrypt_value(s),
+        TransformMode::Decrypt => sb.decrypt_value(s),
+    })
+}
+
+pub fn transform_json_v3(
+    v: &mut Value,
+    sb: &HybridSecureBox,
+    mode: TransformMode,
+) -> Result<(), CryptoError> {
+    transform_json_with(v, &|s| match mode {
+        TransformMode::Encrypt => sb.encrypt_value(s),
+        TransformMode::Decrypt => sb.decrypt_value(s),
+    })
+}
+
+fn transform_json_with(
+    v: &mut Value,
+    transform: &impl Fn(&str) -> Result<String, CryptoError>,
+) -> Result<(), CryptoError> {
     match v {
         Value::Object(map) => {
             for (k, val) in map.iter_mut() {
-                if k == "_public_key" {
+                if k == "_public_key" || k == "_recipient_key" {
                     continue;
                 }
 
                 match val {
                     Value::String(s) => {
-                        let new_s = match mode {
-                            TransformMode::Encrypt => sb.encrypt_value(s)?,
-                            TransformMode::Decrypt => sb.decrypt_value(s)?,
-                        };
+                        let new_s = transform(s)?;
                         *s = new_s;
                     }
                     _ => {
-                        transform_json(val, sb, mode)?;
+                        transform_json_with(val, transform)?;
                     }
                 }
             }
         }
         Value::Array(arr) => {
             for item in arr {
-                transform_json(item, sb, mode)?;
+                transform_json_with(item, transform)?;
             }
         }
         _ => {}
@@ -309,6 +327,7 @@ impl ResolvedSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::{HybridSecureBox, generate_v3_key_bundle};
     use serde_json::json;
 
     #[test]
@@ -489,6 +508,50 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("environment reference cycle detected")
+        );
+    }
+
+    #[test]
+    fn transform_json_v3_roundtrip_and_leaves_recipient_key_untouched() {
+        let bundle = generate_v3_key_bundle().unwrap();
+        let hybrid = HybridSecureBox::from_bundle(bundle.clone());
+        let recipient = bundle.to_recipient_key();
+
+        let mut root = json!({
+            "_recipient_key": recipient,
+            "environment": {
+                "DB_PASS": "secret",
+                "DB_PORT": 5432
+            }
+        });
+
+        transform_json_v3(&mut root, &hybrid, TransformMode::Encrypt).unwrap();
+        assert_eq!(
+            root.get("_recipient_key")
+                .and_then(|v| v.get("key_id"))
+                .and_then(Value::as_str),
+            Some(bundle.key_id.as_str())
+        );
+        assert!(
+            root.get("environment")
+                .and_then(|v| v.get("DB_PASS"))
+                .and_then(Value::as_str)
+                .unwrap()
+                .starts_with("EncJson[@api=3.0:@box=")
+        );
+        assert_eq!(
+            root.get("environment")
+                .and_then(|v| v.get("DB_PORT"))
+                .and_then(Value::as_i64),
+            Some(5432)
+        );
+
+        transform_json_v3(&mut root, &hybrid, TransformMode::Decrypt).unwrap();
+        assert_eq!(
+            root.get("environment")
+                .and_then(|v| v.get("DB_PASS"))
+                .and_then(Value::as_str),
+            Some("secret")
         );
     }
 }

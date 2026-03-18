@@ -6,3 +6,4 @@ pub mod oidc_session;
 pub mod tui_ctl;
 
 pub mod key_sources;
+pub mod recipient;

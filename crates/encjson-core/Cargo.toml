@@ -1,6 +1,6 @@
 [package]
 name = "encjson-core"
-version = "0.5.0"
+version = "0.6.1"
 edition = "2024"
 
 [dependencies]
@@ -13,9 +13,12 @@ chrono = { workspace = true }
 crossterm = { workspace = true }
 dirs = { workspace = true }
 hex = { workspace = true }
+hkdf = { workspace = true }
 lazy_static = { workspace = true }
+ml-kem = { workspace = true }
 openidconnect = { workspace = true }
 rand = { workspace = true }
+rand_core = { workspace = true }
 ratatui = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }

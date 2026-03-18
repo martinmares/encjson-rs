@@ -47,6 +47,12 @@ enum View {
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct KeyItem {
     public_hex: String,
+    #[serde(default)]
+    key_id: Option<String>,
+    #[serde(default)]
+    bundle_version: Option<i32>,
+    #[serde(default)]
+    algorithm: Option<String>,
     tenant: String,
     status: String,
     note: String,
@@ -57,6 +63,12 @@ pub struct KeyItem {
 pub struct RequestItem {
     id: i64,
     public_hex: String,
+    #[serde(default)]
+    key_id: Option<String>,
+    #[serde(default)]
+    bundle_version: Option<i32>,
+    #[serde(default)]
+    algorithm: Option<String>,
     tenant: String,
     note: String,
     tags: Vec<String>,
@@ -1453,8 +1465,12 @@ fn format_key_label(item: &KeyItem) -> String {
     let tenant = truncate(&item.tenant, 10);
     let status = truncate(&item.status, 10);
     let note = truncate(&item.note, 18);
-    let public_hex = short_hex(&item.public_hex);
-    format!("{public_hex} {tenant:<10} {status:<10} {note}")
+    let identity = item
+        .key_id
+        .as_deref()
+        .map(short_hex)
+        .unwrap_or_else(|| short_hex(&item.public_hex));
+    format!("{identity} {tenant:<10} {status:<10} {note}")
 }
 
 fn short_hex(value: &str) -> String {
@@ -1475,11 +1491,15 @@ fn truncate(value: &str, max: usize) -> String {
 }
 
 fn format_request_label(item: &RequestItem) -> String {
-    let public_hex = short_hex(&item.public_hex);
+    let identity = item
+        .key_id
+        .as_deref()
+        .map(short_hex)
+        .unwrap_or_else(|| short_hex(&item.public_hex));
     let tenant = truncate(&item.tenant, 10);
     let status = truncate(&item.status, 10);
     let note = truncate(&item.note, 18);
-    format!("{public_hex} {tenant:<10} {status:<10} {note}")
+    format!("{identity} {tenant:<10} {status:<10} {note}")
 }
 
 fn build_details(app: &App) -> Vec<Line<'static>> {
@@ -1491,7 +1511,7 @@ fn build_details(app: &App) -> Vec<Line<'static>> {
             }
             let selected = app.selected_keys.min(indices.len().saturating_sub(1));
             let item = &app.items[indices[selected]];
-            vec![
+            let mut lines = vec![
                 detail_line("public_hex", &item.public_hex),
                 detail_line("tenant", &item.tenant),
                 detail_line("status", &item.status),
@@ -1507,7 +1527,17 @@ fn build_details(app: &App) -> Vec<Line<'static>> {
                     "note",
                     if item.note.trim().is_empty() { "-" } else { &item.note },
                 ),
-            ]
+            ];
+            if let Some(key_id) = item.key_id.as_deref() {
+                lines.insert(1, detail_line("key_id", key_id));
+            }
+            if let Some(version) = item.bundle_version {
+                lines.push(detail_line("bundle_version", version.to_string()));
+            }
+            if let Some(algorithm) = item.algorithm.as_deref() {
+                lines.push(detail_line("algorithm", algorithm));
+            }
+            lines
         }
         View::Tenants => {
             let indices = filtered_simple_indices(&app.tenants, app.filter.as_ref());
@@ -1534,7 +1564,7 @@ fn build_details(app: &App) -> Vec<Line<'static>> {
             }
             let selected = app.selected_requests.min(indices.len().saturating_sub(1));
             let item = &app.requests[indices[selected]];
-            vec![
+            let mut lines = vec![
                 detail_line("id", item.id.to_string()),
                 detail_line("public_hex", &item.public_hex),
                 detail_line("tenant", &item.tenant),
@@ -1556,7 +1586,17 @@ fn build_details(app: &App) -> Vec<Line<'static>> {
                     item.requested_by.as_deref().unwrap_or("-"),
                 ),
                 detail_line("requested_at", &item.requested_at),
-            ]
+            ];
+            if let Some(key_id) = item.key_id.as_deref() {
+                lines.insert(2, detail_line("key_id", key_id));
+            }
+            if let Some(version) = item.bundle_version {
+                lines.push(detail_line("bundle_version", version.to_string()));
+            }
+            if let Some(algorithm) = item.algorithm.as_deref() {
+                lines.push(detail_line("algorithm", algorithm));
+            }
+            lines
         }
     }
 }
@@ -2053,6 +2093,9 @@ fn render_edit_dialog(f: &mut ratatui::Frame<'_>, app: &App) {
     let mut cursor = None;
     if let Some(item) = selected_item(app) {
         lines.push(form_line_readonly("public_hex", &item.public_hex));
+        if let Some(key_id) = item.key_id.as_deref() {
+            lines.push(form_line_readonly("key_id", key_id));
+        }
         lines.push(Line::from(""));
     }
     if let Some(draft) = app.draft.as_ref() {
@@ -2099,7 +2142,7 @@ fn render_edit_dialog(f: &mut ratatui::Frame<'_>, app: &App) {
 }
 
 fn render_request_edit_dialog(f: &mut ratatui::Frame<'_>, app: &App) {
-    let area = centered_rect(60, 9, f.area());
+    let area = centered_rect(60, 11, f.area());
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2109,6 +2152,12 @@ fn render_request_edit_dialog(f: &mut ratatui::Frame<'_>, app: &App) {
     let mut cursor = None;
     if let Some(draft) = app.request_draft.as_ref() {
         lines.push(form_line_readonly("request_id", draft.id.to_string()));
+        if let Some(item) = selected_request(app) {
+            lines.push(form_line_readonly("public_hex", &item.public_hex));
+            if let Some(key_id) = item.key_id.as_deref() {
+                lines.push(form_line_readonly("key_id", key_id));
+            }
+        }
         lines.push(Line::from(""));
         let tenant_value = draft.tenant.clone();
         let tags_value = if matches!(app.mode, Mode::RequestFieldEdit) && app.edit_field == 1 {

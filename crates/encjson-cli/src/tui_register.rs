@@ -15,7 +15,13 @@ use ratatui::Terminal;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
-use crate::{load_private_key, send_register_request, RegisterPayload};
+use crate::{
+    RegisterPayload, RegisterPayloadLegacy, RegisterPayloadV3, send_register_request,
+};
+use encjson_core::key_store::{StoredKeyMaterial, load_stored_key_material};
+use encjson_core::recipient::{
+    KeyComponentPrivate, PrivateBundle,
+};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Mode {
@@ -204,17 +210,51 @@ fn handle_key(
                         return Ok(false);
                     }
                     let key = app.keys[app.selected].clone();
-                    let private_hex = load_private_key(&key, keydir, None)?;
+                    let payload = match load_stored_key_material(&key, keydir)? {
+                        StoredKeyMaterial::LegacyPrivateHex(private_hex) => {
+                            RegisterPayload::Legacy(RegisterPayloadLegacy {
+                                public_hex: key.clone(),
+                                private_hex,
+                                tenant: draft.tenant.clone(),
+                                note: draft.note.clone(),
+                                tags: draft.tags.clone(),
+                            })
+                        }
+                        StoredKeyMaterial::V3Bundle(bundle) => {
+                            RegisterPayload::V3(RegisterPayloadV3 {
+                                key_id: bundle.key_id.clone(),
+                                version: bundle.version,
+                                algorithm: bundle.algorithm.clone(),
+                                public_bundle: bundle.to_recipient_key().to_public_bundle(),
+                                private_bundle: PrivateBundle {
+                                    version: bundle.version,
+                                    key_id: bundle.key_id.clone(),
+                                    algorithm: bundle.algorithm.clone(),
+                                    components: vec![
+                                        KeyComponentPrivate {
+                                            role: "kex".to_string(),
+                                            algorithm: "x25519".to_string(),
+                                            encoding: "hex".to_string(),
+                                            private: bundle.x25519.private_hex.clone(),
+                                        },
+                                        KeyComponentPrivate {
+                                            role: "kex".to_string(),
+                                            algorithm: "ml-kem-768".to_string(),
+                                            encoding: "base64".to_string(),
+                                            private: bundle.mlkem768.private_b64.clone(),
+                                        },
+                                    ],
+                                },
+                                tenant: draft.tenant.clone(),
+                                note: draft.note.clone(),
+                                tags: draft.tags.clone(),
+                            })
+                        }
+                    };
                     send_register_request(
                         keys_url,
                         token,
-                        RegisterPayload {
-                            public_hex: key,
-                            private_hex,
-                            tenant: draft.tenant.clone(),
-                            note: draft.note.clone(),
-                            tags: draft.tags.clone(),
-                        },
+                        payload,
                     )?;
                     app.keys.remove(app.selected);
                     if app.selected >= app.keys.len() && app.selected > 0 {

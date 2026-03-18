@@ -15,6 +15,7 @@ use encjson_core::key_sources::{
     ConjurConfig, KeySourceKind, KeySourceOptions, RemoteMtlsConfig, VaultConfig, load_from_source,
     require_policy_context,
 };
+use encjson_core::recipient::{PrivateBundle, PublicBundle, compute_key_id};
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, QueryBuilder};
@@ -205,6 +206,10 @@ struct KeyQuery {
 #[derive(Serialize, Deserialize, sqlx::FromRow)]
 struct KeyRow {
     public_hex: String,
+    key_id: Option<String>,
+    bundle_version: Option<i32>,
+    algorithm: Option<String>,
+    public_bundle: Option<serde_json::Value>,
     tenant: String,
     status: String,
     note: Option<String>,
@@ -242,12 +247,31 @@ struct TenantRename {
 }
 
 #[derive(Deserialize)]
-struct RequestCreate {
+struct RequestCreateLegacy {
     public_hex: String,
     private_hex: String,
     tenant: String,
     note: String,
     tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct RequestCreateV3 {
+    key_id: String,
+    version: u32,
+    algorithm: String,
+    public_bundle: PublicBundle,
+    private_bundle: PrivateBundle,
+    tenant: String,
+    note: String,
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RequestCreate {
+    Legacy(RequestCreateLegacy),
+    V3(RequestCreateV3),
 }
 
 #[derive(Deserialize)]
@@ -289,10 +313,14 @@ struct BootstrapImportResponse {
     tags: Vec<String>,
 }
 
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
 struct RequestRow {
     id: i64,
     public_hex: String,
+    key_id: Option<String>,
+    bundle_version: Option<i32>,
+    algorithm: Option<String>,
+    public_bundle: Option<serde_json::Value>,
     tenant: String,
     note: String,
     tags: Vec<String>,
@@ -308,6 +336,11 @@ struct RequestRow {
 struct RequestRowSecret {
     public_hex: String,
     private_hex: Option<String>,
+    key_id: Option<String>,
+    bundle_version: Option<i32>,
+    algorithm: Option<String>,
+    public_bundle: Option<serde_json::Value>,
+    private_bundle: Option<String>,
     tenant: String,
     note: String,
     tags: Vec<String>,
@@ -324,6 +357,34 @@ struct KeyPrivateRow {
 struct KeyPrivateResponse {
     public_hex: String,
     private_hex: String,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct KeyBundleRow {
+    public_hex: String,
+    key_id: Option<String>,
+    bundle_version: Option<i32>,
+    algorithm: Option<String>,
+    public_bundle: Option<serde_json::Value>,
+    private_bundle: Option<String>,
+    tenant: String,
+    status: String,
+    note: Option<String>,
+    tags: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeyBundleResponse {
+    public_hex: String,
+    key_id: String,
+    version: u32,
+    algorithm: String,
+    public_bundle: PublicBundle,
+    private_bundle: PrivateBundle,
+    tenant: String,
+    status: String,
+    note: Option<String>,
+    tags: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -851,6 +912,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/keys", get(list_keys))
         .route("/api/v1/keys/{public_hex}", get(get_key).patch(patch_key))
         .route("/api/v1/keys/{public_hex}/private", get(get_private_key))
+        .route("/api/v1/keys/{key_id}/bundle", get(get_key_bundle))
         .route("/api/v1/me", get(get_me))
         .route("/api/v1/tenants", get(list_tenants).post(create_tenant))
         .route("/api/v1/tenants/{name}", patch(rename_tenant).delete(delete_tenant))
@@ -921,7 +983,7 @@ async fn list_keys(
         Err(resp) => return *resp,
     };
     let mut builder = QueryBuilder::<Postgres>::new(
-        "select public_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys",
+        "select public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys",
     );
     let mut has_where = false;
     let tenant_filter = if auth.is_admin {
@@ -984,7 +1046,7 @@ async fn get_key(
         Err(resp) => return *resp,
     };
     let row = sqlx::query_as::<_, KeyRow>(
-        "select public_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys where public_hex = $1",
+        "select public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys where public_hex = $1",
     )
     .bind(public_hex)
     .fetch_optional(&state.db)
@@ -1082,6 +1144,92 @@ async fn get_private_key(
     }
 }
 
+async fn get_key_bundle(
+    State(state): State<AppState>,
+    Path(key_id): Path<String>,
+    headers: HeaderMap,
+    mtls_spiffe: Option<axum::Extension<MtlsSpiffeIdentity>>,
+) -> impl IntoResponse {
+    let row = sqlx::query_as::<_, KeyBundleRow>(
+        "select public_hex, key_id, bundle_version, algorithm, public_bundle, private_bundle, tenant, status, note, tags \
+         from keys where key_id = $1",
+    )
+    .bind(key_id)
+    .fetch_optional(&state.db)
+    .await;
+
+    match row {
+        Ok(Some(row)) => {
+            let auth = if headers.contains_key(axum::http::header::AUTHORIZATION) {
+                match ensure_auth(&state, &headers) {
+                    Ok(auth) => auth,
+                    Err(resp) => return *resp,
+                }
+            } else {
+                let spiffe_id = mtls_spiffe.map(|x| x.0.spiffe_id);
+                match ensure_auth_spiffe_policy(
+                    &state,
+                    &headers,
+                    "keys.private.read",
+                    &row.tenant,
+                    spiffe_id,
+                ) {
+                    Ok(auth) => auth,
+                    Err(resp) => return *resp,
+                }
+            };
+
+            if !auth.is_admin && !auth.tenants.contains(&row.tenant) {
+                return (StatusCode::FORBIDDEN, "tenant not allowed").into_response();
+            }
+
+            let Some(key_id) = row.key_id.clone() else {
+                return (StatusCode::BAD_REQUEST, "legacy key has no v3 bundle").into_response();
+            };
+            let Some(bundle_version) = row.bundle_version else {
+                return (StatusCode::BAD_REQUEST, "legacy key has no v3 bundle").into_response();
+            };
+            let Some(algorithm) = row.algorithm.clone() else {
+                return (StatusCode::BAD_REQUEST, "legacy key has no v3 bundle").into_response();
+            };
+            let Some(public_bundle_value) = row.public_bundle.clone() else {
+                return (StatusCode::BAD_REQUEST, "public bundle missing").into_response();
+            };
+            let Some(private_bundle_enc) = row.private_bundle.clone() else {
+                return (StatusCode::BAD_REQUEST, "private bundle missing").into_response();
+            };
+            let public_bundle: PublicBundle = match serde_json::from_value(public_bundle_value) {
+                Ok(v) => v,
+                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "invalid public bundle").into_response(),
+            };
+            let private_bundle_json = match decrypt_private_hex(&state.encryption_secret, &private_bundle_enc) {
+                Ok(v) => v,
+                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response(),
+            };
+            let private_bundle: PrivateBundle = match serde_json::from_str(&private_bundle_json) {
+                Ok(v) => v,
+                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "invalid private bundle").into_response(),
+            };
+
+            Json(KeyBundleResponse {
+                public_hex: row.public_hex,
+                key_id,
+                version: bundle_version as u32,
+                algorithm,
+                public_bundle,
+                private_bundle,
+                tenant: row.tenant,
+                status: row.status,
+                note: row.note,
+                tags: row.tags,
+            })
+            .into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(err) => server_error(err),
+    }
+}
+
 async fn patch_key(
     State(state): State<AppState>,
     Path(public_hex): Path<String>,
@@ -1100,7 +1248,7 @@ async fn patch_key(
         Err(err) => return server_error(err),
     };
     let existing = match sqlx::query_as::<_, KeyRow>(
-        "select public_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys where public_hex = $1",
+        "select public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys where public_hex = $1",
     )
     .bind(&public_hex)
     .fetch_optional(&mut *tx)
@@ -1122,7 +1270,7 @@ async fn patch_key(
 
     let updated = sqlx::query_as::<_, KeyRow>(
         "update keys set tenant = $2, status = $3, note = $4, tags = $5, updated_at = now() \
-         where public_hex = $1 returning public_hex, tenant, status, note, tags, created_at, updated_at",
+         where public_hex = $1 returning public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at",
     )
     .bind(&public_hex)
     .bind(tenant)
@@ -1365,45 +1513,101 @@ async fn create_request(
     if !allowed {
         return (StatusCode::TOO_MANY_REQUESTS, "rate limit").into_response();
     }
-    if !is_hex_64(&payload.public_hex) {
-        return (StatusCode::BAD_REQUEST, "invalid public_hex").into_response();
-    }
-    if !is_hex_64(&payload.private_hex) {
-        return (StatusCode::BAD_REQUEST, "invalid private_hex").into_response();
-    }
-    let derived = match public_from_private_hex(payload.private_hex.trim()) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid private_hex").into_response(),
-    };
-    if derived != payload.public_hex.trim() {
-        return (StatusCode::BAD_REQUEST, "public/private mismatch").into_response();
-    }
-    let tags = payload.tags.unwrap_or_default();
     let requested_by = headers
         .get("x-user")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .or(auth.subject.clone());
 
-    let encrypted = match encrypt_private_hex(&state.encryption_secret, payload.private_hex.trim()) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed").into_response(),
-    };
+    let row = match payload {
+        RequestCreate::Legacy(payload) => {
+            if !is_hex_64(&payload.public_hex) {
+                return (StatusCode::BAD_REQUEST, "invalid public_hex").into_response();
+            }
+            if !is_hex_64(&payload.private_hex) {
+                return (StatusCode::BAD_REQUEST, "invalid private_hex").into_response();
+            }
+            let derived = match public_from_private_hex(payload.private_hex.trim()) {
+                Ok(v) => v,
+                Err(_) => return (StatusCode::BAD_REQUEST, "invalid private_hex").into_response(),
+            };
+            if derived != payload.public_hex.trim() {
+                return (StatusCode::BAD_REQUEST, "public/private mismatch").into_response();
+            }
+            let tags = payload.tags.unwrap_or_default();
+            let encrypted =
+                match encrypt_private_hex(&state.encryption_secret, payload.private_hex.trim()) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed")
+                            .into_response();
+                    }
+                };
 
-    let row = sqlx::query_as::<_, RequestRow>(
-        "insert into requests (public_hex, private_hex, tenant, note, tags, requested_by) \
-         values ($1, $2, $3, $4, $5, $6) \
-         returning id, public_hex, tenant, note, tags, status, requested_by, \
-                   requested_at, decided_by, decided_at, decision_note",
-    )
-    .bind(payload.public_hex)
-    .bind(encrypted)
-    .bind(payload.tenant)
-    .bind(payload.note)
-    .bind(tags)
-    .bind(requested_by)
-    .fetch_one(&state.db)
-    .await;
+            sqlx::query_as::<_, RequestRow>(
+                "insert into requests (public_hex, private_hex, tenant, note, tags, requested_by, key_id, bundle_version, algorithm, public_bundle, private_bundle) \
+                 values ($1, $2, $3, $4, $5, $6, null, null, null, null, null) \
+                 returning id, public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, note, tags, status, requested_by, \
+                           requested_at, decided_by, decided_at, decision_note",
+            )
+            .bind(payload.public_hex)
+            .bind(encrypted)
+            .bind(payload.tenant)
+            .bind(payload.note)
+            .bind(tags)
+            .bind(requested_by)
+            .fetch_one(&state.db)
+            .await
+        }
+        RequestCreate::V3(payload) => {
+            let public_hex = match validate_v3_bundles(
+                &payload.key_id,
+                payload.version,
+                &payload.algorithm,
+                &payload.public_bundle,
+                &payload.private_bundle,
+            ) {
+                Ok(v) => v,
+                Err(_) => return (StatusCode::BAD_REQUEST, "invalid v3 key bundle").into_response(),
+            };
+            let tags = payload.tags.unwrap_or_default();
+            let public_bundle_value = match serde_json::to_value(&payload.public_bundle) {
+                Ok(v) => v,
+                Err(_) => return (StatusCode::BAD_REQUEST, "invalid public_bundle").into_response(),
+            };
+            let private_bundle_json = match serde_json::to_string(&payload.private_bundle) {
+                Ok(v) => v,
+                Err(_) => return (StatusCode::BAD_REQUEST, "invalid private_bundle").into_response(),
+            };
+            let private_bundle_enc =
+                match encrypt_private_hex(&state.encryption_secret, &private_bundle_json) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed")
+                            .into_response();
+                    }
+                };
+
+            sqlx::query_as::<_, RequestRow>(
+                "insert into requests (public_hex, private_hex, tenant, note, tags, requested_by, key_id, bundle_version, algorithm, public_bundle, private_bundle) \
+                 values ($1, null, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+                 returning id, public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, note, tags, status, requested_by, \
+                           requested_at, decided_by, decided_at, decision_note",
+            )
+            .bind(public_hex)
+            .bind(payload.tenant)
+            .bind(payload.note)
+            .bind(tags)
+            .bind(requested_by)
+            .bind(payload.key_id)
+            .bind(payload.version as i32)
+            .bind(payload.algorithm)
+            .bind(public_bundle_value)
+            .bind(private_bundle_enc)
+            .fetch_one(&state.db)
+            .await
+        }
+    };
 
     match row {
         Ok(row) => Json(row).into_response(),
@@ -1430,7 +1634,7 @@ async fn list_requests(
     }
     let rows = if let Some(status) = query.status {
         sqlx::query_as::<_, RequestRow>(
-            "select id, public_hex, tenant, note, tags, status, requested_by, requested_at, \
+            "select id, public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, note, tags, status, requested_by, requested_at, \
                     decided_by, decided_at, decision_note \
              from requests where status = $1 order by requested_at desc",
         )
@@ -1439,7 +1643,7 @@ async fn list_requests(
         .await
     } else {
         sqlx::query_as::<_, RequestRow>(
-            "select id, public_hex, tenant, note, tags, status, requested_by, requested_at, \
+            "select id, public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, note, tags, status, requested_by, requested_at, \
                     decided_by, decided_at, decision_note \
              from requests order by requested_at desc",
         )
@@ -1471,7 +1675,7 @@ async fn update_request(
         Err(err) => return server_error(err),
     };
     let req = match sqlx::query_as::<_, RequestRow>(
-        "select id, public_hex, tenant, note, tags, status, requested_by, requested_at, \
+        "select id, public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, note, tags, status, requested_by, requested_at, \
                 decided_by, decided_at, decision_note \
          from requests where id = $1",
     )
@@ -1492,7 +1696,7 @@ async fn update_request(
 
     let updated = sqlx::query_as::<_, RequestRow>(
         "update requests set tenant = $2, note = $3, tags = $4 where id = $1 \
-         returning id, public_hex, tenant, note, tags, status, requested_by, requested_at, \
+         returning id, public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, note, tags, status, requested_by, requested_at, \
                    decided_by, decided_at, decision_note",
     )
     .bind(id)
@@ -1646,6 +1850,42 @@ fn is_hex_64(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+fn extract_x25519_public_hex(bundle: &PublicBundle) -> anyhow::Result<String> {
+    bundle
+        .components
+        .iter()
+        .find(|component| component.role == "kex" && component.algorithm == "x25519")
+        .map(|component| component.public.clone())
+        .filter(|value| is_hex_64(value))
+        .ok_or_else(|| anyhow::anyhow!("public_bundle is missing x25519 public component"))
+}
+
+fn validate_v3_bundles(
+    key_id: &str,
+    version: u32,
+    algorithm: &str,
+    public_bundle: &PublicBundle,
+    private_bundle: &PrivateBundle,
+) -> anyhow::Result<String> {
+    if version != 3 {
+        return Err(anyhow::anyhow!("version must be 3"));
+    }
+    if public_bundle.version != 3 || private_bundle.version != 3 {
+        return Err(anyhow::anyhow!("bundle version must be 3"));
+    }
+    if public_bundle.key_id != key_id || private_bundle.key_id != key_id {
+        return Err(anyhow::anyhow!("bundle key_id mismatch"));
+    }
+    if public_bundle.algorithm != algorithm || private_bundle.algorithm != algorithm {
+        return Err(anyhow::anyhow!("bundle algorithm mismatch"));
+    }
+    let computed = compute_key_id(public_bundle)?;
+    if computed != key_id {
+        return Err(anyhow::anyhow!("key_id does not match public_bundle"));
+    }
+    extract_x25519_public_hex(public_bundle)
+}
+
 async fn load_jwks(url: &str) -> anyhow::Result<std::collections::HashMap<String, DecodingKey>> {
     let body = reqwest::get(url).await?.text().await?;
     let set: JwkSet = serde_json::from_str(&body)?;
@@ -1683,7 +1923,7 @@ async fn approve_request(
         Err(err) => return server_error(err),
     };
     let req = match sqlx::query_as::<_, RequestRowSecret>(
-        "select public_hex, private_hex, tenant, note, tags from requests where id = $1",
+        "select public_hex, private_hex, key_id, bundle_version, algorithm, public_bundle, private_bundle, tenant, note, tags from requests where id = $1",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -1693,10 +1933,6 @@ async fn approve_request(
         Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
         Err(err) => return server_error(err),
     };
-    let Some(private_hex) = req.private_hex.clone() else {
-        return (StatusCode::BAD_REQUEST, "private key missing in request").into_response();
-    };
-
     let tenant = payload.tenant.unwrap_or(req.tenant.clone());
     let status = payload.status.unwrap_or_else(|| STATUS_ACTIVE.to_string());
     if !is_valid_key_status(&status) {
@@ -1705,47 +1941,91 @@ async fn approve_request(
     let note = payload.note.unwrap_or(req.note.clone());
     let tags = payload.tags.unwrap_or(req.tags.clone());
 
-    let decrypted = match decrypt_private_hex(&state.encryption_secret, private_hex.trim()) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response(),
-    };
-    let derived = match public_from_private_hex(decrypted.trim()) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid private_hex").into_response(),
-    };
-    if derived != req.public_hex {
-        return (StatusCode::BAD_REQUEST, "public/private mismatch").into_response();
-    }
-    let encrypted_key = match encrypt_private_hex(&state.encryption_secret, decrypted.trim()) {
-        Ok(v) => v,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed").into_response(),
-    };
+    if let Some(private_hex) = req.private_hex.clone() {
+        let decrypted = match decrypt_private_hex(&state.encryption_secret, private_hex.trim()) {
+            Ok(v) => v,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response(),
+        };
+        let derived = match public_from_private_hex(decrypted.trim()) {
+            Ok(v) => v,
+            Err(_) => return (StatusCode::BAD_REQUEST, "invalid private_hex").into_response(),
+        };
+        if derived != req.public_hex {
+            return (StatusCode::BAD_REQUEST, "public/private mismatch").into_response();
+        }
+        let encrypted_key = match encrypt_private_hex(&state.encryption_secret, decrypted.trim()) {
+            Ok(v) => v,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed").into_response(),
+        };
 
-    let _ = sqlx::query(
-        "insert into keys (public_hex, private_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
-         on conflict (public_hex) do update \
-         set private_hex = excluded.private_hex, tenant = excluded.tenant, \
-             status = excluded.status, note = excluded.note, tags = excluded.tags, \
-             legacy_mode = excluded.legacy_mode, pair_consistent = excluded.pair_consistent, \
-             legacy_reason = excluded.legacy_reason, updated_at = now()",
-    )
-    .bind(&req.public_hex)
-    .bind(encrypted_key)
-    .bind(&tenant)
-    .bind(&status)
-    .bind(&note)
-    .bind(&tags)
-    .bind(false)
-    .bind(true)
-    .bind(None::<String>)
-    .execute(&mut *tx)
-    .await;
+        let _ = sqlx::query(
+            "insert into keys (public_hex, private_hex, key_id, bundle_version, algorithm, public_bundle, private_bundle, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason) \
+             values ($1, $2, null, null, null, null, null, $3, $4, $5, $6, $7, $8, $9) \
+             on conflict (public_hex) do update \
+             set private_hex = excluded.private_hex, tenant = excluded.tenant, \
+                 status = excluded.status, note = excluded.note, tags = excluded.tags, \
+                 legacy_mode = excluded.legacy_mode, pair_consistent = excluded.pair_consistent, \
+                 legacy_reason = excluded.legacy_reason, updated_at = now()",
+        )
+        .bind(&req.public_hex)
+        .bind(encrypted_key)
+        .bind(&tenant)
+        .bind(&status)
+        .bind(&note)
+        .bind(&tags)
+        .bind(false)
+        .bind(true)
+        .bind(None::<String>)
+        .execute(&mut *tx)
+        .await;
+    } else {
+        let Some(key_id) = req.key_id.clone() else {
+            return (StatusCode::BAD_REQUEST, "v3 request missing key_id").into_response();
+        };
+        let Some(bundle_version) = req.bundle_version else {
+            return (StatusCode::BAD_REQUEST, "v3 request missing version").into_response();
+        };
+        let Some(algorithm) = req.algorithm.clone() else {
+            return (StatusCode::BAD_REQUEST, "v3 request missing algorithm").into_response();
+        };
+        let Some(public_bundle) = req.public_bundle.clone() else {
+            return (StatusCode::BAD_REQUEST, "v3 request missing public_bundle").into_response();
+        };
+        let Some(private_bundle) = req.private_bundle.clone() else {
+            return (StatusCode::BAD_REQUEST, "v3 request missing private_bundle").into_response();
+        };
+
+        let _ = sqlx::query(
+            "insert into keys (public_hex, private_hex, key_id, bundle_version, algorithm, public_bundle, private_bundle, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason) \
+             values ($1, null, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+             on conflict (public_hex) do update \
+             set key_id = excluded.key_id, bundle_version = excluded.bundle_version, algorithm = excluded.algorithm, \
+                 public_bundle = excluded.public_bundle, private_bundle = excluded.private_bundle, tenant = excluded.tenant, \
+                 status = excluded.status, note = excluded.note, tags = excluded.tags, \
+                 legacy_mode = excluded.legacy_mode, pair_consistent = excluded.pair_consistent, \
+                 legacy_reason = excluded.legacy_reason, updated_at = now()",
+        )
+        .bind(&req.public_hex)
+        .bind(&key_id)
+        .bind(bundle_version)
+        .bind(&algorithm)
+        .bind(public_bundle)
+        .bind(private_bundle)
+        .bind(&tenant)
+        .bind(&status)
+        .bind(&note)
+        .bind(&tags)
+        .bind(false)
+        .bind(true)
+        .bind(None::<String>)
+        .execute(&mut *tx)
+        .await;
+    }
 
     let updated = sqlx::query_as::<_, RequestRow>(
         "update requests set status = 'approved', tenant = $2, note = $3, tags = $4, \
          decided_by = $5, decided_at = now(), decision_note = $6 where id = $1 \
-         returning id, public_hex, tenant, note, tags, status, requested_by, requested_at, \
+         returning id, public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, note, tags, status, requested_by, requested_at, \
                    decided_by, decided_at, decision_note",
     )
     .bind(id)
@@ -1790,7 +2070,7 @@ async fn reject_request(
     let row = sqlx::query_as::<_, RequestRow>(
         "update requests set status = 'rejected', decided_by = $2, decided_at = now(), \
          decision_note = $3 where id = $1 \
-         returning id, public_hex, tenant, note, tags, status, requested_by, requested_at, \
+         returning id, public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, note, tags, status, requested_by, requested_at, \
                    decided_by, decided_at, decision_note",
     )
     .bind(id)
@@ -2848,7 +3128,8 @@ fn server_error(err: impl std::fmt::Display) -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use encjson_core::crypto::generate_key_pair;
+    use axum::body::to_bytes;
+    use encjson_core::crypto::{generate_key_pair, generate_v3_key_bundle};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2858,6 +3139,100 @@ mod tests {
             .unwrap()
             .as_nanos();
         format!("{}-{nanos}", std::process::id())
+    }
+
+    fn test_app_state(db: PgPool, encryption_secret: &str) -> AppState {
+        AppState {
+            db,
+            encryption_secret: encryption_secret.to_string(),
+            auth_required: false,
+            jwt_issuer: None,
+            jwt_audience: None,
+            jwks: HashMap::new(),
+            rate_limit: RateLimitCfg {
+                per_minute: 1000,
+                requests_per_minute: 1000,
+            },
+            rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
+            ui: UiCfg {
+                enabled: false,
+                issuer: None,
+                client_id: None,
+                client_secret: None,
+                base_url: None,
+                cookie_secure: false,
+            },
+            ui_states: Arc::new(Mutex::new(HashMap::new())),
+            ui_sessions: Arc::new(Mutex::new(HashMap::new())),
+            policy: None,
+            mtls_required: false,
+            bootstrap: BootstrapCfg {
+                source_options: None,
+                default_status: STATUS_ACTIVE.to_string(),
+                default_note: "bootstrap".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn validate_v3_bundles_accepts_consistent_bundle() {
+        let bundle = generate_v3_key_bundle().unwrap();
+        let recipient = bundle.to_recipient_key();
+        let public_bundle = recipient.to_public_bundle();
+        let private_bundle = PrivateBundle {
+            version: bundle.version,
+            key_id: bundle.key_id.clone(),
+            algorithm: bundle.algorithm.clone(),
+            components: vec![
+                encjson_core::recipient::KeyComponentPrivate {
+                    role: "kex".to_string(),
+                    algorithm: "x25519".to_string(),
+                    encoding: "hex".to_string(),
+                    private: bundle.x25519.private_hex.clone(),
+                },
+                encjson_core::recipient::KeyComponentPrivate {
+                    role: "kex".to_string(),
+                    algorithm: "ml-kem-768".to_string(),
+                    encoding: "base64".to_string(),
+                    private: bundle.mlkem768.private_b64.clone(),
+                },
+            ],
+        };
+
+        let public_hex = validate_v3_bundles(
+            &bundle.key_id,
+            3,
+            &bundle.algorithm,
+            &public_bundle,
+            &private_bundle,
+        )
+        .unwrap();
+
+        assert_eq!(public_hex, bundle.x25519.public_hex);
+    }
+
+    #[test]
+    fn validate_v3_bundles_rejects_wrong_key_id() {
+        let bundle = generate_v3_key_bundle().unwrap();
+        let recipient = bundle.to_recipient_key();
+        let public_bundle = recipient.to_public_bundle();
+        let private_bundle = PrivateBundle {
+            version: bundle.version,
+            key_id: bundle.key_id.clone(),
+            algorithm: bundle.algorithm.clone(),
+            components: vec![],
+        };
+
+        let err = validate_v3_bundles(
+            "deadbeef",
+            3,
+            &bundle.algorithm,
+            &public_bundle,
+            &private_bundle,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("bundle key_id mismatch") || err.to_string().contains("key_id does not match"));
     }
 
     #[tokio::test]
@@ -2930,6 +3305,124 @@ mod tests {
             .execute(&db)
             .await;
         let _ = fs::remove_dir_all(&keydir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn v3_request_approve_and_bundle_fetch_roundtrip() -> anyhow::Result<()> {
+        let Some(database_url) = std::env::var("DATABASE_URL").ok() else {
+            eprintln!("skip v3 request integration test: DATABASE_URL is not set");
+            return Ok(());
+        };
+
+        let db = PgPool::connect(&database_url).await?;
+        sqlx::migrate!("../../migrations").run(&db).await?;
+
+        let unique = unique_suffix();
+        let encryption_secret = format!("v3-request-secret-{unique}");
+        let state = test_app_state(db.clone(), &encryption_secret);
+
+        let bundle = generate_v3_key_bundle()?;
+        let recipient = bundle.to_recipient_key();
+        let public_bundle = recipient.to_public_bundle();
+        let private_bundle = PrivateBundle {
+            version: bundle.version,
+            key_id: bundle.key_id.clone(),
+            algorithm: bundle.algorithm.clone(),
+            components: vec![
+                encjson_core::recipient::KeyComponentPrivate {
+                    role: "kex".to_string(),
+                    algorithm: "x25519".to_string(),
+                    encoding: "hex".to_string(),
+                    private: bundle.x25519.private_hex.clone(),
+                },
+                encjson_core::recipient::KeyComponentPrivate {
+                    role: "kex".to_string(),
+                    algorithm: "ml-kem-768".to_string(),
+                    encoding: "base64".to_string(),
+                    private: bundle.mlkem768.private_b64.clone(),
+                },
+            ],
+        };
+        let tenant = format!("tenant-{unique}");
+        let note = format!("note-{unique}");
+        let tags = vec!["smoke".to_string(), unique.clone()];
+
+        let create_response = create_request(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(RequestCreate::V3(RequestCreateV3 {
+                key_id: bundle.key_id.clone(),
+                version: bundle.version,
+                algorithm: bundle.algorithm.clone(),
+                public_bundle: public_bundle.clone(),
+                private_bundle: private_bundle.clone(),
+                tenant: tenant.clone(),
+                note: note.clone(),
+                tags: Some(tags.clone()),
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(create_response.status(), StatusCode::OK);
+        let create_body = to_bytes(create_response.into_body(), usize::MAX).await?;
+        let created: RequestRow = serde_json::from_slice(&create_body)?;
+        assert_eq!(created.key_id.as_deref(), Some(bundle.key_id.as_str()));
+        assert_eq!(created.bundle_version, Some(3));
+        assert_eq!(created.algorithm.as_deref(), Some(bundle.algorithm.as_str()));
+        assert_eq!(created.tenant, tenant);
+        assert_eq!(created.tags, tags);
+
+        let approve_response = approve_request(
+            State(state.clone()),
+            Path(created.id),
+            HeaderMap::new(),
+            Json(RequestApprove {
+                tenant: None,
+                status: Some(STATUS_ACTIVE.to_string()),
+                note: Some("approved note".to_string()),
+                tags: Some(vec!["approved".to_string()]),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(approve_response.status(), StatusCode::OK);
+        let approve_body = to_bytes(approve_response.into_body(), usize::MAX).await?;
+        let approved: RequestRow = serde_json::from_slice(&approve_body)?;
+        assert_eq!(approved.status, "approved");
+        assert_eq!(approved.key_id.as_deref(), Some(bundle.key_id.as_str()));
+
+        let bundle_response = get_key_bundle(
+            State(state.clone()),
+            Path(bundle.key_id.clone()),
+            HeaderMap::new(),
+            None,
+        )
+        .await
+        .into_response();
+        assert_eq!(bundle_response.status(), StatusCode::OK);
+        let bundle_body = to_bytes(bundle_response.into_body(), usize::MAX).await?;
+        let fetched: KeyBundleResponse = serde_json::from_slice(&bundle_body)?;
+        assert_eq!(fetched.key_id, bundle.key_id);
+        assert_eq!(fetched.version, 3);
+        assert_eq!(fetched.algorithm, bundle.algorithm);
+        assert_eq!(fetched.public_hex, bundle.x25519.public_hex);
+        assert_eq!(fetched.public_bundle, public_bundle);
+        assert_eq!(fetched.private_bundle, private_bundle);
+
+        let _ = sqlx::query("delete from requests where id = $1")
+            .bind(created.id)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("delete from keys where key_id = $1")
+            .bind(&bundle.key_id)
+            .execute(&db)
+            .await;
+        let _ = sqlx::query("delete from tenants where name = $1")
+            .bind(&tenant)
+            .execute(&db)
+            .await;
+
         Ok(())
     }
 }
