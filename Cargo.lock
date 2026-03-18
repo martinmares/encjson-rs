@@ -500,6 +500,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19c9f1dde76b736e3681f28cec9d5a61299cbaae0fce80a68e43724ad56031eb"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -994,12 +1003,13 @@ dependencies = [
 
 [[package]]
 name = "encjson-cli"
-version = "0.6.1"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
  "clap",
+ "clap_complete",
  "crossterm",
  "encjson-core",
  "ratatui",
@@ -1017,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "encjson-core"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1055,6 +1065,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "clap_complete",
  "encjson-core",
  "tokio",
 ]
