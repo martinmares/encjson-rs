@@ -11,18 +11,30 @@ use std::path::{Path, PathBuf};
 use std::sync::Once;
 use std::collections::BTreeMap;
 
-use encjson_core::crypto::{SecureBox, generate_pair_consistent_key_pair};
+use encjson_core::crypto::{HybridSecureBox, SecureBox, generate_pair_consistent_key_pair, generate_v3_key_bundle};
 use encjson_core::error::Error;
-use encjson_core::json_utils::{TransformMode, dotenv_exports, env_exports, transform_json};
+use encjson_core::json_utils::{TransformMode, dotenv_exports, env_exports, transform_json, transform_json_v3};
 use encjson_core::key_sources::{
     CliKeyInput, ConjurConfig, KeySourceKind, KeySourceOptions, RemoteMtlsConfig, VaultConfig,
     derive_public_hex_from_private, load_from_cli, load_from_source, require_policy_context,
 };
-use encjson_core::key_store::{default_key_dir, list_public_keys, load_private_key, save_private_key};
+use encjson_core::key_store::{
+    StoredKeyMaterial, default_key_dir, list_public_keys, load_private_key,
+    load_stored_key_material, load_v3_key_bundle, save_private_key, save_v3_key_bundle,
+};
 use encjson_core::oidc_session;
+use encjson_core::recipient::{PrivateBundle, PublicBundle, RecipientMetadata};
 use crate::tui_edit::run_edit_ui;
 
 type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum EncJsonApiVersion {
+    #[value(name = "2.0")]
+    V2_0,
+    #[value(name = "3.0")]
+    V3_0,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -205,6 +217,10 @@ enum Commands {
         #[arg(short, long, env = "ENCJSON_KEYDIR")]
         keydir: Option<PathBuf>,
 
+        /// Key/API version to initialize
+        #[arg(long, value_enum, default_value_t = EncJsonApiVersion::V3_0)]
+        api: EncJsonApiVersion,
+
         /// Also create `env.secured.json` in current directory with generated public key
         #[arg(long)]
         create_file: bool,
@@ -218,7 +234,7 @@ enum Commands {
         keydir: Option<PathBuf>,
     },
 
-    /// Show key info for a secured JSON file (_public_key + resolved private key)
+    /// Show key info for a secured JSON file (_public_key/_recipient_key + resolved key material)
     Info {
         #[command(flatten)]
         resolve: ResolveArgs,
@@ -368,7 +384,9 @@ enum Commands {
         keydir: Option<PathBuf>,
     },
 
-    /// Render Secret containing public/private key pair resolved from JSON _public_key
+    /// Render Secret with runtime key material:
+    /// - api=2.0 => public/private pair from `_public_key`
+    /// - api=3.0 => expanded `ENCJSON_*` env-style fields from `_recipient_key`
     #[command(name = "render-k8s-pair-secret")]
     RenderK8sPairSecret {
         #[command(flatten)]
@@ -390,11 +408,11 @@ enum Commands {
         #[arg(long)]
         namespace: Option<String>,
 
-        /// Public key field name in data
+        /// Public key field name in data (api=2.0 only)
         #[arg(long, default_value = "public-key")]
         public_key_name: String,
 
-        /// Private key field name in data
+        /// Private key field name in data (api=2.0 only)
         #[arg(long, default_value = "private-key")]
         private_key_name: String,
 
@@ -500,6 +518,41 @@ enum Commands {
         #[arg(short = 'w', long)]
         write: bool,
 
+        /// Existing v3 recipient key id to use (api=3.0 only)
+        #[arg(long)]
+        recipient: Option<String>,
+
+        /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
+        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        keydir: Option<PathBuf>,
+    },
+
+    /// Explicitly migrate secured file format (e.g. api=2.0 -> api=3.0)
+    #[command(name = "migrate-format")]
+    MigrateFormat {
+        #[command(flatten)]
+        resolve: ResolveArgs,
+
+        /// Input file
+        #[arg(short, long)]
+        file: Option<PathBuf>,
+
+        /// Optional positional input path
+        #[arg(value_name = "INPUT", conflicts_with = "file")]
+        input: Option<PathBuf>,
+
+        /// Target API version
+        #[arg(long, value_enum)]
+        to: EncJsonApiVersion,
+
+        /// Target recipient key id for api=3.0 (if omitted, a new v3 key bundle is generated)
+        #[arg(long)]
+        recipient: Option<String>,
+
+        /// Overwrite the input file in place
+        #[arg(short = 'w', long)]
+        write: bool,
+
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
         #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
         keydir: Option<PathBuf>,
@@ -507,8 +560,8 @@ enum Commands {
 
     /// Register local keys to keys server (pending approval)
     Register {
-        /// Optional public key to register explicitly
-        #[arg(value_name = "PUBLIC_HEX")]
+        /// Optional key reference to register explicitly (legacy public_hex or v3 key_id)
+        #[arg(value_name = "KEY_REF")]
         public_hex: Option<String>,
 
         /// Keys server URL (overrides ENCJSON_KEYS_URL)
@@ -519,11 +572,11 @@ enum Commands {
         #[arg(long, env = "ENCJSON_ACCESS_TOKEN")]
         token: Option<String>,
 
-        /// Tenant name (required for explicit public_hex)
+        /// Tenant name (required for explicit key reference)
         #[arg(long)]
         tenant: Option<String>,
 
-        /// Note (required for explicit public_hex)
+        /// Note (required for explicit key reference)
         #[arg(long)]
         note: Option<String>,
 
@@ -554,11 +607,11 @@ enum Commands {
 
     /// Sync private keys from the keys server into the local key directory
     Sync {
-        /// Input file (reads _public_key)
+        /// Input file (reads _public_key or _recipient_key)
         #[arg(short, long, conflicts_with = "key")]
         file: Option<PathBuf>,
 
-        /// Public key to sync explicitly
+        /// Key reference to sync explicitly (legacy public_hex or v3 key_id)
         #[arg(long, conflicts_with = "file")]
         key: Option<String>,
 
@@ -743,11 +796,11 @@ fn main() {
         return;
     }
 
-    if let Some(cmd) = cli.command {
-        if let Err(e) = run(cmd) {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
+    if let Some(cmd) = cli.command
+        && let Err(e) = run(cmd)
+    {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
     }
 }
 
@@ -755,8 +808,9 @@ fn run(command: Commands) -> Result<()> {
     match command {
         Commands::Init {
             keydir,
+            api,
             create_file,
-        } => cmd_init(keydir, create_file),
+        } => cmd_init(keydir, api, create_file),
         Commands::List { keydir } => cmd_list(keydir),
         Commands::Info {
             resolve,
@@ -961,6 +1015,7 @@ fn run(command: Commands) -> Result<()> {
             file,
             input,
             write,
+            recipient,
             keydir,
         } => {
             validate_scope_args(&resolve)?;
@@ -971,7 +1026,26 @@ fn run(command: Commands) -> Result<()> {
                 source_cfg: &source_cfg,
                 legacy_mode: resolve.legacy_mode,
             };
-            cmd_rekey(FileInput { file, input }, write, &ctx)
+            cmd_rekey(FileInput { file, input }, recipient.as_deref(), write, &ctx)
+        }
+        Commands::MigrateFormat {
+            resolve,
+            file,
+            input,
+            to,
+            recipient,
+            write,
+            keydir,
+        } => {
+            validate_scope_args(&resolve)?;
+            let source_cfg = source_cfg_from_resolve_args(&resolve);
+            let ctx = ResolveCtx {
+                keydir,
+                private_key: resolve.private_key.as_deref(),
+                source_cfg: &source_cfg,
+                legacy_mode: resolve.legacy_mode,
+            };
+            cmd_migrate_format(FileInput { file, input }, to, recipient.as_deref(), write, &ctx)
         }
         Commands::Register {
             public_hex,
@@ -1125,20 +1199,42 @@ fn handle_status() -> Result<()> {
 #[derive(serde::Deserialize)]
 struct KeysKey {
     public_hex: String,
+    key_id: Option<String>,
+    bundle_version: Option<i32>,
 }
 
 #[derive(serde::Deserialize)]
 struct KeysRequest {
     public_hex: String,
+    key_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
-struct RegisterPayload {
+struct RegisterPayloadLegacy {
     public_hex: String,
     private_hex: String,
     tenant: String,
     note: String,
     tags: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct RegisterPayloadV3 {
+    key_id: String,
+    version: u32,
+    algorithm: String,
+    public_bundle: PublicBundle,
+    private_bundle: PrivateBundle,
+    tenant: String,
+    note: String,
+    tags: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum RegisterPayload {
+    Legacy(RegisterPayloadLegacy),
+    V3(RegisterPayloadV3),
 }
 
 #[derive(serde::Deserialize)]
@@ -1147,7 +1243,16 @@ struct KeysPrivateKey {
     private_hex: String,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(serde::Deserialize)]
+struct KeysBundle {
+    key_id: String,
+    version: u32,
+    algorithm: String,
+    public_bundle: PublicBundle,
+    private_bundle: PrivateBundle,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct K8sSecretManifest {
     #[serde(rename = "apiVersion")]
     api_version: String,
@@ -1158,7 +1263,7 @@ struct K8sSecretManifest {
     data: BTreeMap<String, String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct K8sMetadata {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1303,7 +1408,6 @@ struct RenderK8sSecretOptions {
 
 #[derive(Debug, Clone)]
 struct AssetsBundle {
-    public_key: Option<String>,
     assets: BTreeMap<String, AssetEntry>,
 }
 
@@ -1414,7 +1518,7 @@ fn cmd_register(cmd: RegisterCommand, ctx: &ResolveCtx<'_>) -> Result<()> {
     if let Some(public_hex) = public_hex {
         let tenant = tenant.ok_or(Error::RegisterMissingFields)?;
         let note = note.ok_or(Error::RegisterMissingFields)?;
-        let private_hex = if ctx.private_key.is_some()
+        let payload = if ctx.private_key.is_some()
             || private_key_file.is_some()
             || private_key_fd.is_some()
             || private_key_stdin
@@ -1430,18 +1534,17 @@ fn cmd_register(cmd: RegisterCommand, ctx: &ResolveCtx<'_>) -> Result<()> {
                 allow_insecure_cli_private_key,
             })
             .map_err(|e| Error::Http(e.to_string()))?;
-            loaded.private_hex
+            RegisterPayload::Legacy(RegisterPayloadLegacy {
+                public_hex,
+                private_hex: loaded.private_hex,
+                tenant,
+                note,
+                tags,
+            })
         } else {
-            resolve_private_key_for_public(&public_hex, ctx)?
-            .private_hex
+            build_register_payload_from_local_key(&public_hex, tenant, note, tags, ctx)?
         };
-        send_register_request(&keys_url, &token, RegisterPayload {
-            public_hex,
-            private_hex,
-            tenant,
-            note,
-            tags,
-        })?;
+        send_register_request(&keys_url, &token, payload)?;
         println!("Register request submitted.");
         return Ok(());
     }
@@ -1456,8 +1559,8 @@ fn cmd_register(cmd: RegisterCommand, ctx: &ResolveCtx<'_>) -> Result<()> {
     let pending = fetch_pending_requests(&keys_url, &token)?;
     let existing: std::collections::HashSet<String> = remote_keys
         .into_iter()
-        .map(|k| k.public_hex)
-        .chain(pending.into_iter().map(|r| r.public_hex))
+        .map(|k| k.key_id.unwrap_or(k.public_hex))
+        .chain(pending.into_iter().map(|r| r.key_id.unwrap_or(r.public_hex)))
         .collect();
 
     let mut new_keys: Vec<String> = local_keys
@@ -1484,6 +1587,54 @@ fn cmd_register(cmd: RegisterCommand, ctx: &ResolveCtx<'_>) -> Result<()> {
     Ok(())
 }
 
+fn build_register_payload_from_local_key(
+    key_ref: &str,
+    tenant: String,
+    note: String,
+    tags: Vec<String>,
+    ctx: &ResolveCtx<'_>,
+) -> Result<RegisterPayload> {
+    match load_stored_key_material(key_ref, ctx.keydir.as_deref())? {
+        StoredKeyMaterial::LegacyPrivateHex(private_hex) => Ok(RegisterPayload::Legacy(
+            RegisterPayloadLegacy {
+                public_hex: key_ref.to_string(),
+                private_hex,
+                tenant,
+                note,
+                tags,
+            },
+        )),
+        StoredKeyMaterial::V3Bundle(bundle) => Ok(RegisterPayload::V3(RegisterPayloadV3 {
+            key_id: bundle.key_id.clone(),
+            version: bundle.version,
+            algorithm: bundle.algorithm.clone(),
+            public_bundle: bundle.to_recipient_key().to_public_bundle(),
+            private_bundle: PrivateBundle {
+                version: bundle.version,
+                key_id: bundle.key_id.clone(),
+                algorithm: bundle.algorithm.clone(),
+                components: vec![
+                    encjson_core::recipient::KeyComponentPrivate {
+                        role: "kex".to_string(),
+                        algorithm: "x25519".to_string(),
+                        encoding: "hex".to_string(),
+                        private: bundle.x25519.private_hex.clone(),
+                    },
+                    encjson_core::recipient::KeyComponentPrivate {
+                        role: "kex".to_string(),
+                        algorithm: "ml-kem-768".to_string(),
+                        encoding: "base64".to_string(),
+                        private: bundle.mlkem768.private_b64.clone(),
+                    },
+                ],
+            },
+            tenant,
+            note,
+            tags,
+        })),
+    }
+}
+
 fn cmd_list(keydir: Option<PathBuf>) -> Result<()> {
     let keys = list_public_keys(keydir.as_deref())?;
     if keys.is_empty() {
@@ -1499,12 +1650,24 @@ fn cmd_list(keydir: Option<PathBuf>) -> Result<()> {
 fn cmd_info(input: FileInput, ctx: &ResolveCtx<'_>) -> Result<()> {
     let effective_path = input.file.or(input.input);
     let root = read_json(effective_path.as_ref())?;
-    let public_key_hex = extract_public_key(&root)?.to_string();
-    let resolved = resolve_private_key_for_public(&public_key_hex, ctx)?;
-
-    println!("public_key: {public_key_hex}");
-    println!("private_key: {}", resolved.private_hex);
-    println!("pair_consistent: {}", resolved.pair_consistent);
+    match RecipientMetadata::parse(&root)? {
+        RecipientMetadata::LegacyPublicKey(public_key_hex) => {
+            print_legacy_api2_warning();
+            let resolved = resolve_private_key_for_public(&public_key_hex, ctx)?;
+            println!("metadata: legacy");
+            println!("public_key: {public_key_hex}");
+            println!("private_key: {}", resolved.private_hex);
+            println!("pair_consistent: {}", resolved.pair_consistent);
+        }
+        RecipientMetadata::RecipientKeyV3(recipient) => {
+            println!("metadata: recipient_key");
+            println!("version: {}", recipient.version);
+            println!("key_id: {}", recipient.key_id);
+            println!("algorithm: {}", recipient.algorithm);
+            println!("x25519_public_hex: {}", recipient.x25519_public_hex);
+            println!("mlkem768_public_b64: {}", recipient.mlkem768_public_b64);
+        }
+    }
     Ok(())
 }
 
@@ -1614,6 +1777,27 @@ fn fetch_private_key(keys_url: &str, token: &str, public_hex: &str) -> Result<Ke
     serde_json::from_str(&body).map_err(Error::Json)
 }
 
+fn fetch_key_bundle(keys_url: &str, token: &str, key_id: &str) -> Result<KeysBundle> {
+    let url = format!(
+        "{}/api/v1/keys/{}/bundle",
+        keys_url.trim_end_matches('/'),
+        key_id
+    );
+    let response = reqwest::blocking::Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    if !status.is_success() {
+        return Err(Error::Http(body.trim().to_string()));
+    }
+    serde_json::from_str(&body).map_err(Error::Json)
+}
+
 fn cmd_sync(
     file: Option<PathBuf>,
     key: Option<String>,
@@ -1626,45 +1810,123 @@ fn cmd_sync(
         .or_else(load_token_from_session)
         .ok_or(Error::MissingAccessToken)?;
 
-    let mut public_keys: Vec<String> = if let Some(public_hex) = key {
-        vec![public_hex]
+    let mut remote_keys = fetch_remote_keys(&keys_url, &token)?;
+    if let Some(ref key_ref) = key {
+        remote_keys.retain(|item| {
+            item.public_hex == *key_ref || item.key_id.as_deref() == Some(key_ref.as_str())
+        });
     } else if let Some(path) = file.as_ref() {
         let json = read_json(Some(path))?;
-        vec![extract_public_key(&json)?.to_string()]
-    } else {
-        fetch_remote_keys(&keys_url, &token)?
-            .into_iter()
-            .map(|k| k.public_hex)
-            .collect()
-    };
+        match RecipientMetadata::parse(&json)? {
+            RecipientMetadata::LegacyPublicKey(public_hex) => {
+                remote_keys.retain(|item| item.public_hex == public_hex);
+            }
+            RecipientMetadata::RecipientKeyV3(recipient) => {
+                remote_keys.retain(|item| item.key_id.as_deref() == Some(recipient.key_id.as_str()));
+            }
+        }
+    }
 
-    if public_keys.is_empty() {
+    if remote_keys.is_empty() {
         println!("No keys to sync.");
         return Ok(());
     }
 
-    public_keys.sort();
-    public_keys.dedup();
-
     let mut downloaded = 0;
     let mut skipped = 0;
-    for public_hex in public_keys {
-        let private_key = fetch_private_key(&keys_url, &token, &public_hex)?;
-        if private_key.public_hex != public_hex {
-            return Err(Error::Http(format!(
-                "keys server returned mismatched key {}",
-                private_key.public_hex
-            )));
+    let dir = keydir.clone().unwrap_or_else(default_key_dir);
+    std::fs::create_dir_all(&dir)?;
+    remote_keys.sort_by(|a, b| {
+        a.key_id
+            .as_deref()
+            .unwrap_or(a.public_hex.as_str())
+            .cmp(b.key_id.as_deref().unwrap_or(b.public_hex.as_str()))
+    });
+    remote_keys.dedup_by(|a, b| {
+        a.key_id.as_deref().unwrap_or(a.public_hex.as_str())
+            == b.key_id.as_deref().unwrap_or(b.public_hex.as_str())
+    });
+
+    for item in remote_keys {
+        if item.bundle_version == Some(3) {
+            let Some(key_id) = item.key_id.as_deref() else {
+                return Err(Error::Http(
+                    "keys server returned v3 key without key_id".to_string(),
+                ));
+            };
+            let path = dir.join(key_id);
+            if path.exists() {
+                skipped += 1;
+                continue;
+            }
+            let bundle = fetch_key_bundle(&keys_url, &token, key_id)?;
+            save_v3_key_bundle(
+                &encjson_core::recipient::LocalKeyFileV3 {
+                    version: bundle.version,
+                    key_id: bundle.key_id,
+                    algorithm: bundle.algorithm,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    x25519: encjson_core::recipient::LocalX25519Keypair {
+                        public_hex: bundle
+                            .public_bundle
+                            .components
+                            .iter()
+                            .find(|c| c.algorithm == "x25519")
+                            .map(|c| c.public.clone())
+                            .ok_or_else(|| {
+                                Error::Http("v3 bundle missing x25519 public component".to_string())
+                            })?,
+                        private_hex: bundle
+                            .private_bundle
+                            .components
+                            .iter()
+                            .find(|c| c.algorithm == "x25519")
+                            .map(|c| c.private.clone())
+                            .ok_or_else(|| {
+                                Error::Http("v3 bundle missing x25519 private component".to_string())
+                            })?,
+                    },
+                    mlkem768: encjson_core::recipient::LocalMlKem768Keypair {
+                        public_b64: bundle
+                            .public_bundle
+                            .components
+                            .iter()
+                            .find(|c| c.algorithm == "ml-kem-768")
+                            .map(|c| c.public.clone())
+                            .ok_or_else(|| {
+                                Error::Http("v3 bundle missing ml-kem-768 public component".to_string())
+                            })?,
+                        private_b64: bundle
+                            .private_bundle
+                            .components
+                            .iter()
+                            .find(|c| c.algorithm == "ml-kem-768")
+                            .map(|c| c.private.clone())
+                            .ok_or_else(|| {
+                                Error::Http("v3 bundle missing ml-kem-768 private component".to_string())
+                            })?,
+                    },
+                },
+                Some(&dir),
+            )?;
+            downloaded += 1;
+        } else {
+            let public_hex = item.public_hex;
+            let private_key = fetch_private_key(&keys_url, &token, &public_hex)?;
+            if private_key.public_hex != public_hex {
+                return Err(Error::Http(format!(
+                    "keys server returned mismatched key {}",
+                    private_key.public_hex
+                )));
+            }
+            let path = dir.join(&public_hex);
+            if path.exists() {
+                skipped += 1;
+                continue;
+            }
+            save_private_key(&public_hex, &private_key.private_hex, Some(&dir))?;
+            downloaded += 1;
         }
-        let dir = keydir.clone().unwrap_or_else(default_key_dir);
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(&public_hex);
-        if path.exists() {
-            skipped += 1;
-            continue;
-        }
-        save_private_key(&public_hex, &private_key.private_hex, Some(&dir))?;
-        downloaded += 1;
     }
 
     println!("Sync OK. Downloaded: {downloaded}, Skipped: {skipped}");
@@ -1743,7 +2005,33 @@ fn is_hex_key_name(name: &str) -> bool {
 }
 
 
-fn cmd_init(keydir: Option<PathBuf>, create_file: bool) -> Result<()> {
+fn cmd_init(keydir: Option<PathBuf>, api: EncJsonApiVersion, create_file: bool) -> Result<()> {
+    if api == EncJsonApiVersion::V3_0 {
+        let bundle = generate_v3_key_bundle()?;
+        let recipient = bundle.to_recipient_key();
+        let path = save_v3_key_bundle(&bundle, keydir.as_deref())?;
+
+        println!("OK init");
+        println!("  api       : 3.0");
+        println!("  key_id    : {}", bundle.key_id);
+        println!("  algorithm : {}", bundle.algorithm);
+        println!("  key file  : {}", path.display());
+
+        if create_file {
+            let out = PathBuf::from("env.secured.json");
+            if out.exists() {
+                return Err(Error::FileAlreadyExists(out.display().to_string()));
+            }
+            let template = serde_json::json!({
+                "_recipient_key": recipient,
+                "environment": {}
+            });
+            fs::write(&out, serde_json::to_string_pretty(&template)?)?;
+            println!("  created   : {}", out.display());
+        }
+        return Ok(());
+    }
+
     let (priv_hex, pub_hex) = generate_pair_consistent_key_pair();
     let path = save_private_key(&pub_hex, &priv_hex, keydir.as_deref())?;
 
@@ -1778,28 +2066,29 @@ fn cmd_encrypt(
     let effective_path = input.file.or(input.input);
 
     let mut value = read_json(effective_path.as_ref())?;
+    let legacy_api2 = matches!(
+        RecipientMetadata::parse(&value),
+        Ok(RecipientMetadata::LegacyPublicKey(_))
+    );
 
     let mut pair_mismatch = false;
-    match extract_public_key(&value) {
-        Ok(public_key_hex) => {
-            // _public_key existuje, normálně šifrujeme
-            let resolved = resolve_private_key_for_public(public_key_hex, ctx)?;
-            pair_mismatch = !resolved.pair_consistent;
-            let sb = SecureBox::new_from_hex(&resolved.private_hex, public_key_hex)?;
+    match resolve_json_crypto(&value, ctx)? {
+        ResolvedJsonCrypto::None => {
+            eprintln!("Warning: no recipient metadata found in JSON, nothing encrypted");
+        }
+        ResolvedJsonCrypto::Legacy { sb, pair_mismatch: legacy_pair_mismatch } => {
+            pair_mismatch = legacy_pair_mismatch;
             transform_json(&mut value, &sb, TransformMode::Encrypt)?;
         }
-        Err(Error::MissingPublicKey) => {
-            // Bez _public_key nedává crypto smysl -> jen pass-through.
-            // JSON necháme jak je; volitelně upozorníme na stderr.
-            eprintln!("Warning: _public_key not found in JSON, nothing encrypted");
-        }
-        Err(e) => {
-            // jiné chyby (např. špatný formát klíče) jsou pořád fatální
-            return Err(e);
+        ResolvedJsonCrypto::V3 { sb } => {
+            transform_json_v3(&mut value, &sb, TransformMode::Encrypt)?;
         }
     }
 
     write_json_to(effective_path.as_ref(), write, &value)?;
+    if legacy_api2 {
+        print_legacy_api2_warning();
+    }
     if pair_mismatch && warn_pair_mismatch {
         eprintln!(
             "Warning: legacy inconsistent key pair detected for _public_key; encryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`."
@@ -1838,6 +2127,7 @@ fn cmd_decrypt(
 
     // sjednotíme -f a pozicní argument (např. "-")
     let effective_path = input.file.or(input.input);
+    let legacy_api2 = input_path_uses_legacy_api2(effective_path.as_ref())?;
     let (value, pair_mismatch) = decrypt_json_with_sidecar(effective_path.as_ref(), ctx)?;
 
     if let Some(name) = env_name {
@@ -1854,6 +2144,9 @@ fn cmd_decrypt(
     match output {
         OutputFormat::Json => {
             write_json_to(effective_path.as_ref(), write, &value)?;
+            if legacy_api2 && warn_pair_mismatch {
+                print_legacy_api2_warning();
+            }
             if pair_mismatch && warn_pair_mismatch {
                 eprintln!(
                     "Warning: legacy inconsistent key pair detected for _public_key; decryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`."
@@ -2013,19 +2306,19 @@ fn load_assets_bundle(input: FileInput, ctx: &ResolveCtx<'_>) -> Result<AssetsBu
     let effective_path = input.file.or(input.input);
     let mut root = read_json(effective_path.as_ref())?;
 
-    let public_key = match extract_public_key(&root) {
-        Ok(public_key_hex) => {
-            let public_key_hex = public_key_hex.to_string();
-            let resolved = resolve_private_key_for_public(&public_key_hex, ctx)?;
-            let sb = SecureBox::new_from_hex(&resolved.private_hex, &public_key_hex)?;
+    match resolve_json_crypto(&root, ctx)? {
+        ResolvedJsonCrypto::None => None,
+        ResolvedJsonCrypto::Legacy { sb, .. } => {
             transform_json(&mut root, &sb, TransformMode::Decrypt)?;
-            Some(public_key_hex)
+            Some(())
         }
-        Err(Error::MissingPublicKey) => None,
-        Err(e) => return Err(e),
+        ResolvedJsonCrypto::V3 { sb } => {
+            transform_json_v3(&mut root, &sb, TransformMode::Decrypt)?;
+            None
+        }
     };
 
-    parse_assets_bundle(&root).map(|assets| AssetsBundle { public_key, assets })
+    parse_assets_bundle(&root).map(|assets| AssetsBundle { assets })
 }
 
 fn parse_assets_bundle(root: &Value) -> Result<BTreeMap<String, AssetEntry>> {
@@ -2090,6 +2383,7 @@ fn asset_kind_from_bytes(bytes: &[u8]) -> AssetKind {
     }
 }
 
+#[cfg(test)]
 fn effective_asset_kind(entry: &AssetEntry) -> AssetKind {
     entry.kind.unwrap_or_else(|| {
         decode_asset_base64("<detect>", &entry.content)
@@ -2293,15 +2587,14 @@ fn decrypt_json_with_sidecar(
     let sidecar_schema = load_sidecar_schema(effective_path)?;
 
     let mut pair_mismatch = false;
-    if let Ok(public_key_hex) = extract_public_key(&value) {
-        let resolved = resolve_private_key_for_public(public_key_hex, ctx)?;
-        pair_mismatch = !resolved.pair_consistent;
-        let sb = SecureBox::new_from_hex(&resolved.private_hex, public_key_hex)?;
-        transform_json(&mut value, &sb, TransformMode::Decrypt)?;
-    } else if let Err(e) = extract_public_key(&value) {
-        match e {
-            Error::MissingPublicKey => {}
-            other => return Err(other),
+    match resolve_json_crypto(&value, ctx)? {
+        ResolvedJsonCrypto::None => {}
+        ResolvedJsonCrypto::Legacy { sb, pair_mismatch: legacy_pair_mismatch } => {
+            pair_mismatch = legacy_pair_mismatch;
+            transform_json(&mut value, &sb, TransformMode::Decrypt)?;
+        }
+        ResolvedJsonCrypto::V3 { sb } => {
+            transform_json_v3(&mut value, &sb, TransformMode::Decrypt)?;
         }
     }
 
@@ -2326,6 +2619,7 @@ fn cmd_render_k8s_secret(
         output,
     } = opts;
     let effective_path = input.file.or(input.input);
+    let legacy_api2 = input_path_uses_legacy_api2(effective_path.as_ref())?;
     let (value, pair_mismatch) = decrypt_json_with_sidecar(effective_path.as_ref(), ctx)?;
 
     let env_obj = value
@@ -2360,6 +2654,9 @@ fn cmd_render_k8s_secret(
     } else {
         print!("{yaml}");
     }
+    if legacy_api2 {
+        print_legacy_api2_warning();
+    }
     if pair_mismatch {
         eprintln!(
             "Warning: legacy inconsistent key pair detected for _public_key; decryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`."
@@ -2379,19 +2676,51 @@ fn cmd_render_k8s_pair_secret(
 ) -> Result<()> {
     let effective_path = input.file.or(input.input);
     let value = read_json(effective_path.as_ref())?;
-    let public_key = extract_public_key(&value)?.to_string();
-    let resolved = resolve_private_key_for_public(&public_key, ctx)?;
+    let manifest = match RecipientMetadata::parse(&value)? {
+        RecipientMetadata::LegacyPublicKey(public_key) => {
+            print_legacy_api2_warning();
+            let resolved = resolve_private_key_for_public(&public_key, ctx)?;
+            let mut data = BTreeMap::new();
+            data.insert(public_key_name, encode_k8s_data(&public_key));
+            data.insert(private_key_name, encode_k8s_data(&resolved.private_hex));
 
-    let mut data = BTreeMap::new();
-    data.insert(public_key_name, encode_k8s_data(&public_key));
-    data.insert(private_key_name, encode_k8s_data(&resolved.private_hex));
+            K8sSecretManifest {
+                api_version: "v1".to_string(),
+                kind: "Secret".to_string(),
+                metadata: K8sMetadata { name, namespace },
+                secret_type: "Opaque".to_string(),
+                data,
+            }
+        }
+        RecipientMetadata::RecipientKeyV3(recipient) => {
+            let bundle = load_v3_key_bundle(&recipient.key_id, ctx.keydir.as_deref())?;
+            let mut data = BTreeMap::new();
+            data.insert("ENCJSON_KEY_VERSION".to_string(), encode_k8s_data("3"));
+            data.insert(
+                "ENCJSON_X25519_PUBLIC".to_string(),
+                encode_k8s_data(&bundle.x25519.public_hex),
+            );
+            data.insert(
+                "ENCJSON_X25519_PRIVATE".to_string(),
+                encode_k8s_data(&bundle.x25519.private_hex),
+            );
+            data.insert(
+                "ENCJSON_MLKEM768_PUBLIC".to_string(),
+                encode_k8s_data(&bundle.mlkem768.public_b64),
+            );
+            data.insert(
+                "ENCJSON_MLKEM768_PRIVATE".to_string(),
+                encode_k8s_data(&bundle.mlkem768.private_b64),
+            );
 
-    let manifest = K8sSecretManifest {
-        api_version: "v1".to_string(),
-        kind: "Secret".to_string(),
-        metadata: K8sMetadata { name, namespace },
-        secret_type: "Opaque".to_string(),
-        data,
+            K8sSecretManifest {
+                api_version: "v1".to_string(),
+                kind: "Secret".to_string(),
+                metadata: K8sMetadata { name, namespace },
+                secret_type: "Opaque".to_string(),
+                data,
+            }
+        }
     };
     let yaml = serde_yaml_ng::to_string(&manifest)
         .map_err(|e| Error::Http(format!("failed to serialize secret YAML: {e}")))?;
@@ -2620,6 +2949,10 @@ fn cmd_set(
 ) -> Result<()> {
     let effective_path = input.file.or(input.input);
     let mut root = read_json(effective_path.as_ref())?;
+    let legacy_api2 = matches!(
+        RecipientMetadata::parse(&root),
+        Ok(RecipientMetadata::LegacyPublicKey(_))
+    );
 
     // Resolve env root key once (`environment` preferred, then `env`).
     let env_key = {
@@ -2633,20 +2966,19 @@ fn cmd_set(
         }
     };
 
-    let sb = match extract_public_key(&root) {
-        Ok(public_key_hex) => {
-            let private_key_hex = resolve_private_key_for_public(public_key_hex, ctx)?
-            .private_hex;
-            Some(SecureBox::new_from_hex(&private_key_hex, public_key_hex)?)
-        }
-        Err(Error::MissingPublicKey) => None,
-        Err(e) => return Err(e),
-    };
+    let crypto = resolve_json_crypto(&root, ctx)?;
 
     // For secured files, decrypt only env subtree, update, then re-encrypt only that subtree.
-    if let Some(sb) = sb.as_ref() {
-        let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
-        transform_json(env_value, sb, TransformMode::Decrypt)?;
+    match &crypto {
+        ResolvedJsonCrypto::None => {}
+        ResolvedJsonCrypto::Legacy { sb, .. } => {
+            let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
+            transform_json(env_value, sb, TransformMode::Decrypt)?;
+        }
+        ResolvedJsonCrypto::V3 { sb } => {
+            let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
+            transform_json_v3(env_value, sb, TransformMode::Decrypt)?;
+        }
     }
 
     let env_obj = root
@@ -2660,17 +2992,32 @@ fn cmd_set(
     };
     env_obj.insert(key, parsed_value);
 
-    if let Some(sb) = sb.as_ref() {
-        let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
-        transform_json(env_value, sb, TransformMode::Encrypt)?;
+    match &crypto {
+        ResolvedJsonCrypto::None => {}
+        ResolvedJsonCrypto::Legacy { sb, .. } => {
+            let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
+            transform_json(env_value, sb, TransformMode::Encrypt)?;
+        }
+        ResolvedJsonCrypto::V3 { sb } => {
+            let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
+            transform_json_v3(env_value, sb, TransformMode::Encrypt)?;
+        }
     }
 
-    write_json_to(effective_path.as_ref(), write, &root)
+    write_json_to(effective_path.as_ref(), write, &root)?;
+    if legacy_api2 {
+        print_legacy_api2_warning();
+    }
+    Ok(())
 }
 
 fn cmd_unset(input: FileInput, key: String, write: bool, ctx: &ResolveCtx<'_>) -> Result<()> {
     let effective_path = input.file.or(input.input);
     let mut root = read_json(effective_path.as_ref())?;
+    let legacy_api2 = matches!(
+        RecipientMetadata::parse(&root),
+        Ok(RecipientMetadata::LegacyPublicKey(_))
+    );
 
     let env_key = {
         let obj = root.as_object().ok_or(Error::MissingEnvObject)?;
@@ -2683,19 +3030,18 @@ fn cmd_unset(input: FileInput, key: String, write: bool, ctx: &ResolveCtx<'_>) -
         }
     };
 
-    let sb = match extract_public_key(&root) {
-        Ok(public_key_hex) => {
-            let private_key_hex = resolve_private_key_for_public(public_key_hex, ctx)?
-            .private_hex;
-            Some(SecureBox::new_from_hex(&private_key_hex, public_key_hex)?)
-        }
-        Err(Error::MissingPublicKey) => None,
-        Err(e) => return Err(e),
-    };
+    let crypto = resolve_json_crypto(&root, ctx)?;
 
-    if let Some(sb) = sb.as_ref() {
-        let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
-        transform_json(env_value, sb, TransformMode::Decrypt)?;
+    match &crypto {
+        ResolvedJsonCrypto::None => {}
+        ResolvedJsonCrypto::Legacy { sb, .. } => {
+            let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
+            transform_json(env_value, sb, TransformMode::Decrypt)?;
+        }
+        ResolvedJsonCrypto::V3 { sb } => {
+            let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
+            transform_json_v3(env_value, sb, TransformMode::Decrypt)?;
+        }
     }
 
     let env_obj = root
@@ -2704,44 +3050,177 @@ fn cmd_unset(input: FileInput, key: String, write: bool, ctx: &ResolveCtx<'_>) -
         .ok_or(Error::MissingEnvObject)?;
     env_obj.remove(&key);
 
-    if let Some(sb) = sb.as_ref() {
-        let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
-        transform_json(env_value, sb, TransformMode::Encrypt)?;
+    match &crypto {
+        ResolvedJsonCrypto::None => {}
+        ResolvedJsonCrypto::Legacy { sb, .. } => {
+            let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
+            transform_json(env_value, sb, TransformMode::Encrypt)?;
+        }
+        ResolvedJsonCrypto::V3 { sb } => {
+            let env_value = root.get_mut(env_key).ok_or(Error::MissingEnvObject)?;
+            transform_json_v3(env_value, sb, TransformMode::Encrypt)?;
+        }
     }
 
-    write_json_to(effective_path.as_ref(), write, &root)
+    write_json_to(effective_path.as_ref(), write, &root)?;
+    if legacy_api2 {
+        print_legacy_api2_warning();
+    }
+    Ok(())
 }
 
-fn cmd_rekey(input: FileInput, write: bool, ctx: &ResolveCtx<'_>) -> Result<()> {
+fn cmd_rekey(
+    input: FileInput,
+    recipient_key_id: Option<&str>,
+    write: bool,
+    ctx: &ResolveCtx<'_>,
+) -> Result<()> {
     let effective_path = input.file.or(input.input);
     let mut root = read_json(effective_path.as_ref())?;
+    let target = effective_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "stdin/stdout".to_string());
+    match RecipientMetadata::parse(&root)? {
+        RecipientMetadata::LegacyPublicKey(old_public) => {
+            if recipient_key_id.is_some() {
+                return Err(Error::Http(
+                    "--recipient is supported only for api=3.0 rotate-key".to_string(),
+                ));
+            }
+            let old_private = resolve_private_key_for_public(&old_public, ctx)?.private_hex;
+            let old_sb = SecureBox::new_from_hex(&old_private, &old_public)?;
+            transform_json(&mut root, &old_sb, TransformMode::Decrypt)?;
+
+            // rotate-key always generates pair-consistent keys.
+            let (new_private, new_public) = generate_pair_consistent_key_pair();
+            let new_sb = SecureBox::new_from_hex(&new_private, &new_public)?;
+            if let Some(obj) = root.as_object_mut() {
+                obj.insert("_public_key".to_string(), Value::String(new_public.clone()));
+            } else {
+                return Err(Error::MissingEnvObject);
+            }
+            transform_json(&mut root, &new_sb, TransformMode::Encrypt)?;
+            let key_path = save_private_key(&new_public, &new_private, ctx.keydir.as_deref())?;
+
+            write_json_to(effective_path.as_ref(), write, &root)?;
+            println!("OK rotate-key");
+            println!("  target file: {target}");
+            println!("  format     : 2.0 (legacy)");
+            println!("  old public : {old_public}");
+            println!("  new public : {new_public}");
+            println!("  new key    : {}", key_path.display());
+            if !write {
+                println!("  output     : stdout (use -w to write file)");
+            }
+            Ok(())
+        }
+        RecipientMetadata::RecipientKeyV3(old_recipient) => {
+            let old_bundle = load_v3_key_bundle(&old_recipient.key_id, ctx.keydir.as_deref())?;
+            let old_sb = HybridSecureBox::from_bundle(old_bundle);
+            transform_json_v3(&mut root, &old_sb, TransformMode::Decrypt)?;
+
+            let new_bundle = if let Some(key_id) = recipient_key_id {
+                load_v3_key_bundle(key_id, ctx.keydir.as_deref())?
+            } else {
+                generate_v3_key_bundle()?
+            };
+            let new_recipient = new_bundle.to_recipient_key();
+            let new_sb = HybridSecureBox::from_bundle(new_bundle.clone());
+
+            let old_obj = root.as_object_mut().ok_or(Error::MissingEnvObject)?;
+            old_obj.remove("_recipient_key");
+            let mut reordered = serde_json::Map::new();
+            reordered.insert(
+                "_recipient_key".to_string(),
+                serde_json::to_value(&new_recipient)?,
+            );
+            for (key, value) in std::mem::take(old_obj) {
+                reordered.insert(key, value);
+            }
+            *old_obj = reordered;
+
+            transform_json_v3(&mut root, &new_sb, TransformMode::Encrypt)?;
+            let key_path = save_v3_key_bundle(&new_bundle, ctx.keydir.as_deref())?;
+
+            write_json_to(effective_path.as_ref(), write, &root)?;
+            println!("OK rotate-key");
+            println!("  target file: {target}");
+            println!("  format     : 3.0");
+            println!("  old key_id : {}", old_recipient.key_id);
+            println!("  new key_id : {}", new_recipient.key_id);
+            println!("  new key    : {}", key_path.display());
+            if recipient_key_id.is_some() {
+                println!("  recipient  : existing bundle");
+            }
+            if !write {
+                println!("  output     : stdout (use -w to write file)");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn cmd_migrate_format(
+    input: FileInput,
+    to: EncJsonApiVersion,
+    recipient_key_id: Option<&str>,
+    write: bool,
+    ctx: &ResolveCtx<'_>,
+) -> Result<()> {
+    let effective_path = input.file.or(input.input);
+    let mut root = read_json(effective_path.as_ref())?;
+
+    if to != EncJsonApiVersion::V3_0 {
+        return Err(Error::Http(
+            "migrate-format currently supports only --to 3.0".to_string(),
+        ));
+    }
 
     let old_public = extract_public_key(&root)?.to_string();
     let old_private = resolve_private_key_for_public(&old_public, ctx)?.private_hex;
     let old_sb = SecureBox::new_from_hex(&old_private, &old_public)?;
     transform_json(&mut root, &old_sb, TransformMode::Decrypt)?;
 
-    // rotate-key always generates pair-consistent keys.
-    let (new_private, new_public) = generate_pair_consistent_key_pair();
-    let new_sb = SecureBox::new_from_hex(&new_private, &new_public)?;
-    if let Some(obj) = root.as_object_mut() {
-        obj.insert("_public_key".to_string(), Value::String(new_public.clone()));
+    let generated_bundle;
+    let new_bundle = if let Some(key_id) = recipient_key_id {
+        load_v3_key_bundle(key_id, ctx.keydir.as_deref())?
     } else {
-        return Err(Error::MissingEnvObject);
-    }
-    transform_json(&mut root, &new_sb, TransformMode::Encrypt)?;
-    let key_path = save_private_key(&new_public, &new_private, ctx.keydir.as_deref())?;
+        generated_bundle = generate_v3_key_bundle()?;
+        save_v3_key_bundle(&generated_bundle, ctx.keydir.as_deref())?;
+        generated_bundle
+    };
+    let new_recipient = new_bundle.to_recipient_key();
+    let new_sb = HybridSecureBox::from_bundle(new_bundle);
 
+    let old_obj = root.as_object_mut().ok_or(Error::MissingEnvObject)?;
+    old_obj.remove("_public_key");
+    let mut reordered = serde_json::Map::new();
+    reordered.insert(
+        "_recipient_key".to_string(),
+        serde_json::to_value(&new_recipient)?,
+    );
+    for (key, value) in std::mem::take(old_obj) {
+        reordered.insert(key, value);
+    }
+    *old_obj = reordered;
+
+    transform_json_v3(&mut root, &new_sb, TransformMode::Encrypt)?;
     write_json_to(effective_path.as_ref(), write, &root)?;
+
     let target = effective_path
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "stdin/stdout".to_string());
-    println!("OK rotate-key");
+    println!("OK migrate-format");
     println!("  target file: {target}");
+    println!("  from api   : 2.0");
+    println!("  to api     : 3.0");
     println!("  old public : {old_public}");
-    println!("  new public : {new_public}");
-    println!("  new key    : {}", key_path.display());
+    println!("  recipient  : {}", new_recipient.key_id);
+    if recipient_key_id.is_none() {
+        println!("  key bundle : generated automatically");
+    }
     if !write {
         println!("  output     : stdout (use -w to write file)");
     }
@@ -2894,26 +3373,83 @@ fn normalize_line_endings(value: &str) -> String {
     value.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+enum ResolvedJsonCrypto {
+    None,
+    Legacy { sb: SecureBox, pair_mismatch: bool },
+    V3 { sb: HybridSecureBox },
+}
+
+fn resolve_json_crypto(root: &Value, ctx: &ResolveCtx<'_>) -> Result<ResolvedJsonCrypto> {
+    match RecipientMetadata::parse(root) {
+        Ok(RecipientMetadata::LegacyPublicKey(public_key_hex)) => {
+            let resolved = resolve_private_key_for_public(&public_key_hex, ctx)?;
+            let sb = SecureBox::new_from_hex(&resolved.private_hex, &public_key_hex)?;
+            Ok(ResolvedJsonCrypto::Legacy {
+                sb,
+                pair_mismatch: !resolved.pair_consistent,
+            })
+        }
+        Ok(RecipientMetadata::RecipientKeyV3(recipient)) => {
+            let bundle = load_v3_key_bundle(&recipient.key_id, ctx.keydir.as_deref())?;
+            Ok(ResolvedJsonCrypto::V3 {
+                sb: HybridSecureBox::from_bundle(bundle),
+            })
+        }
+        Err(Error::MissingRecipientMetadata) => Ok(ResolvedJsonCrypto::None),
+        Err(err) => Err(err),
+    }
+}
+
+fn input_path_uses_legacy_api2(path: Option<&PathBuf>) -> Result<bool> {
+    let Some(path) = path else {
+        return Ok(false);
+    };
+    if path.as_os_str() == OsStr::new("-") {
+        return Ok(false);
+    }
+    let root = read_json(Some(path))?;
+    Ok(matches!(
+        RecipientMetadata::parse(&root),
+        Ok(RecipientMetadata::LegacyPublicKey(_))
+    ))
+}
+
+fn print_legacy_api2_warning() {
+    eprintln!(
+        "Warning: legacy EncJson api=2.0 detected; migrate to api=3.0 with `encjson migrate-format -f <file> --to 3.0 -w`."
+    );
+}
+
 /// Extract `_public_key` from JSON and validate length (64 hex chars).
 pub(crate) fn extract_public_key(root: &Value) -> Result<&str> {
-    if let Some(pk) = root.get("_public_key").and_then(Value::as_str) {
-        if pk.len() == 64 {
-            return Ok(pk);
-        } else {
-            return Err(Error::InvalidPublicKey);
-        }
+    match RecipientMetadata::parse(root) {
+        Err(Error::MissingRecipientMetadata) => Err(Error::MissingPublicKey),
+        Err(err) => Err(err),
+        Ok(RecipientMetadata::RecipientKeyV3(_)) => Err(Error::UnsupportedRecipientKey(
+            "this command path still expects legacy `_public_key`; api=3.0 support is not wired here yet"
+                .to_string(),
+        )),
+        Ok(RecipientMetadata::LegacyPublicKey(_)) => root
+            .get("_public_key")
+            .and_then(Value::as_str)
+            .ok_or(Error::MissingPublicKey),
     }
-    Err(Error::MissingPublicKey)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn empty_source_cfg() -> KeySourceRuntimeConfig {
         KeySourceRuntimeConfig::default()
+    }
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn unique_path(prefix: &str, suffix: &str) -> PathBuf {
@@ -3054,15 +3590,15 @@ mod tests {
             "-f",
             "mtls.secured.json",
             "--name",
-            "mtls-test-tsm-dms-tsm-dms",
+            "mtls-test-api-api",
             "--namespace",
             "nac-test",
             "--from-env",
-            "MTLS_TEST_TSM_DMS_TLS_CRT=tls.crt",
+            "MTLS_TEST_API_TLS_CRT=tls.crt",
             "--from-env",
-            "MTLS_TEST_TSM_DMS_TLS_KEY=tls.key",
+            "MTLS_TEST_API_TLS_KEY=tls.key",
             "--from-env",
-            "MTLS_TEST_TSM_DMS_CA_CRT=ca.crt",
+            "MTLS_TEST_API_CA_CRT=ca.crt",
             "-k",
             "keys-dir",
         ]);
@@ -3077,7 +3613,7 @@ mod tests {
                 ..
             }) => {
                 assert_eq!(keydir, Some(PathBuf::from("keys-dir")));
-                assert_eq!(name.as_deref(), Some("mtls-test-tsm-dms-tsm-dms"));
+                assert_eq!(name.as_deref(), Some("mtls-test-api-api"));
                 assert_eq!(namespace.as_deref(), Some("nac-test"));
                 assert_eq!(secret_type, K8sSecretType::KubernetesIoTls);
                 assert_eq!(from_env.len(), 3);
@@ -3120,7 +3656,7 @@ mod tests {
             "-f",
             "env.secured.json",
             "--name",
-            "tsm-secrets",
+            "app-secrets",
             "--namespace",
             "nac-test",
         ]);
@@ -3132,7 +3668,7 @@ mod tests {
                 private_key_name,
                 ..
             }) => {
-                assert_eq!(name, "tsm-secrets");
+                assert_eq!(name, "app-secrets");
                 assert_eq!(namespace.as_deref(), Some("nac-test"));
                 assert_eq!(public_key_name, "public-key");
                 assert_eq!(private_key_name, "private-key");
@@ -3163,7 +3699,7 @@ mod tests {
             "keys-dir",
             "-f",
             "env.json",
-            "TSM_DB_PASSWORD",
+            "APP_DB_PASSWORD",
             "secret",
             "-w",
         ]);
@@ -3184,7 +3720,7 @@ mod tests {
             "keys-dir",
             "-f",
             "env.json",
-            "TSM_DB_PASSWORD",
+            "APP_DB_PASSWORD",
             "-w",
         ]);
         match cli.command {
@@ -3201,6 +3737,49 @@ mod tests {
         match cli.command {
             Some(Commands::Init { create_file, .. }) => {
                 assert!(create_file);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_init_accepts_api_version() {
+        let cli = Cli::parse_from(["encjson", "init", "--api", "3.0"]);
+        match cli.command {
+            Some(Commands::Init { api, .. }) => {
+                assert_eq!(api, EncJsonApiVersion::V3_0);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_init_defaults_to_api_v3() {
+        let cli = Cli::parse_from(["encjson", "init"]);
+        match cli.command {
+            Some(Commands::Init { api, .. }) => {
+                assert_eq!(api, EncJsonApiVersion::V3_0);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_migrate_format_accepts_optional_recipient() {
+        let cli = Cli::parse_from([
+            "encjson",
+            "migrate-format",
+            "-f",
+            "env.secured.json",
+            "--to",
+            "3.0",
+            "-w",
+        ]);
+        match cli.command {
+            Some(Commands::MigrateFormat { recipient, to, write, .. }) => {
+                assert_eq!(to, EncJsonApiVersion::V3_0);
+                assert!(write);
+                assert!(recipient.is_none());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -3226,13 +3805,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_rotate_key_accepts_optional_recipient() {
+        let cli = Cli::parse_from([
+            "encjson",
+            "rotate-key",
+            "-f",
+            "env.json",
+            "--recipient",
+            "abc123",
+            "-w",
+        ]);
+        match cli.command {
+            Some(Commands::RotateKey { recipient, write, .. }) => {
+                assert_eq!(recipient.as_deref(), Some("abc123"));
+                assert!(write);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_register_accepts_secure_private_key_inputs() {
         let cli = Cli::parse_from([
             "encjson",
             "register",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--tenant",
-            "tsm",
+            "demo",
             "--note",
             "bootstrap",
             "--private-key-file",
@@ -3259,14 +3858,14 @@ mod tests {
             "decrypt",
             "--scope-required",
             "--tenant",
-            "tsm",
+            "demo",
             "--env",
             "test",
         ]);
         match cli.command {
             Some(Commands::Decrypt { resolve, .. }) => {
                 assert!(resolve.scope_required);
-                assert_eq!(resolve.tenant.as_deref(), Some("tsm"));
+                assert_eq!(resolve.tenant.as_deref(), Some("demo"));
                 assert_eq!(resolve.env_name.as_deref(), Some("test"));
             }
             other => panic!("unexpected command: {other:?}"),
@@ -3311,7 +3910,7 @@ mod tests {
         let source_cfg = empty_source_cfg();
         fs::write(
             &path,
-            r#"{"environment":{"TSM_A":"a","TSM_B":"b"}}"#,
+            r#"{"environment":{"APP_A":"a","APP_B":"b"}}"#,
         )
         .unwrap();
 
@@ -3320,7 +3919,7 @@ mod tests {
                 file: Some(path.clone()),
                 input: None,
             },
-            "TSM_B".to_string(),
+            "APP_B".to_string(),
             "new-b".to_string(),
             false,
             true,
@@ -3335,8 +3934,8 @@ mod tests {
 
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let env = root.get("environment").unwrap().as_object().unwrap();
-        assert_eq!(env.get("TSM_A").unwrap().as_str(), Some("a"));
-        assert_eq!(env.get("TSM_B").unwrap().as_str(), Some("new-b"));
+        assert_eq!(env.get("APP_A").unwrap().as_str(), Some("a"));
+        assert_eq!(env.get("APP_B").unwrap().as_str(), Some("new-b"));
 
         let _ = fs::remove_file(path);
     }
@@ -3345,14 +3944,14 @@ mod tests {
     fn cmd_set_json_value_stores_number() {
         let path = unique_path("set-json", ".json");
         let source_cfg = empty_source_cfg();
-        fs::write(&path, r#"{"environment":{"TSM_UI_PUBLIC_PORT":443}}"#).unwrap();
+        fs::write(&path, r#"{"environment":{"APP_PUBLIC_PORT":443}}"#).unwrap();
 
         cmd_set(
             FileInput {
                 file: Some(path.clone()),
                 input: None,
             },
-            "TSM_UI_PUBLIC_PORT".to_string(),
+            "APP_PUBLIC_PORT".to_string(),
             "8443".to_string(),
             true,
             true,
@@ -3367,7 +3966,7 @@ mod tests {
 
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let env = root.get("environment").unwrap().as_object().unwrap();
-        assert_eq!(env.get("TSM_UI_PUBLIC_PORT").unwrap().as_i64(), Some(8443));
+        assert_eq!(env.get("APP_PUBLIC_PORT").unwrap().as_i64(), Some(8443));
 
         let _ = fs::remove_file(path);
     }
@@ -3376,14 +3975,14 @@ mod tests {
     fn cmd_unset_removes_key_from_env_alias() {
         let path = unique_path("unset", ".json");
         let source_cfg = empty_source_cfg();
-        fs::write(&path, r#"{"env":{"TSM_A":"a","TSM_B":"b"}}"#).unwrap();
+        fs::write(&path, r#"{"env":{"APP_A":"a","APP_B":"b"}}"#).unwrap();
 
         cmd_unset(
             FileInput {
                 file: Some(path.clone()),
                 input: None,
             },
-            "TSM_A".to_string(),
+            "APP_A".to_string(),
             true,
             &ResolveCtx {
                 keydir: None,
@@ -3396,8 +3995,8 @@ mod tests {
 
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let env = root.get("env").unwrap().as_object().unwrap();
-        assert!(env.get("TSM_A").is_none());
-        assert_eq!(env.get("TSM_B").unwrap().as_str(), Some("b"));
+        assert!(env.get("APP_A").is_none());
+        assert_eq!(env.get("APP_B").unwrap().as_str(), Some("b"));
 
         let _ = fs::remove_file(path);
     }
@@ -3413,7 +4012,7 @@ mod tests {
                 file: Some(path.clone()),
                 input: None,
             },
-            "TSM_A".to_string(),
+            "APP_A".to_string(),
             "x".to_string(),
             false,
             true,
@@ -3431,6 +4030,81 @@ mod tests {
     }
 
     #[test]
+    fn cmd_set_and_decrypt_json_with_sidecar_roundtrip_for_v3() {
+        let key_dir = unique_path("v3-keys", "");
+        fs::create_dir_all(&key_dir).unwrap();
+        let path = unique_path("v3-set", ".secured.json");
+        let source_cfg = empty_source_cfg();
+
+        let bundle = encjson_core::crypto::generate_v3_key_bundle().unwrap();
+        let recipient = bundle.to_recipient_key();
+        save_v3_key_bundle(&bundle, Some(&key_dir)).unwrap();
+
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                    "_recipient_key": recipient,
+                    "environment": {
+                    "APP_DB_PASSWORD": "secret"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        cmd_set(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            "APP_DB_PASSWORD".to_string(),
+            "new-secret".to_string(),
+            false,
+            true,
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let stored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            stored
+                .get("environment")
+                .and_then(|v| v.get("APP_DB_PASSWORD"))
+                .and_then(Value::as_str)
+                .unwrap()
+                .starts_with("EncJson[@api=3.0:@box=")
+        );
+
+        let (decrypted, pair_mismatch) = decrypt_json_with_sidecar(
+            Some(&path),
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        assert!(!pair_mismatch);
+        assert_eq!(
+            decrypted
+                .get("environment")
+                .and_then(|v| v.get("APP_DB_PASSWORD"))
+                .and_then(Value::as_str),
+            Some("new-secret")
+        );
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(key_dir);
+    }
+
+    #[test]
     fn cmd_rotate_key_rewrites_public_key() {
         let dir = unique_path("rotate-key-dir", "");
         let source_cfg = empty_source_cfg();
@@ -3443,7 +4117,7 @@ mod tests {
         fs::write(
             &path,
             format!(
-                r#"{{"_public_key":"{old_public}","environment":{{"TSM_DB_PASSWORD":"secret"}}}}"#
+                r#"{{"_public_key":"{old_public}","environment":{{"APP_DB_PASSWORD":"secret"}}}}"#
             ),
         )
         .unwrap();
@@ -3453,6 +4127,7 @@ mod tests {
                 file: Some(path.clone()),
                 input: None,
             },
+            None,
             true,
             &ResolveCtx {
                 keydir: Some(dir.clone()),
@@ -3485,7 +4160,7 @@ mod tests {
         fs::write(
             &path,
             format!(
-                r#"{{"_public_key":"{old_public}","environment":{{"TSM_DB_PASSWORD":"secret"}}}}"#
+                r#"{{"_public_key":"{old_public}","environment":{{"APP_DB_PASSWORD":"secret"}}}}"#
             ),
         )
         .unwrap();
@@ -3495,6 +4170,7 @@ mod tests {
                 file: Some(path.clone()),
                 input: None,
             },
+            None,
             true,
             &ResolveCtx {
                 keydir: Some(dir.clone()),
@@ -3513,6 +4189,555 @@ mod tests {
 
         let _ = fs::remove_file(path);
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cmd_rotate_key_rewrites_recipient_key_for_v3() {
+        let dir = unique_path("rotate-key-v3-dir", "");
+        let source_cfg = empty_source_cfg();
+        fs::create_dir_all(&dir).unwrap();
+
+        let bundle = encjson_core::crypto::generate_v3_key_bundle().unwrap();
+        let old_key_id = bundle.key_id.clone();
+        let recipient = bundle.to_recipient_key();
+        save_v3_key_bundle(&bundle, Some(&dir)).unwrap();
+
+        let path = unique_path("rotate-key-v3-file", ".json");
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                    "_recipient_key": recipient,
+                    "environment": {
+                    "APP_DB_PASSWORD": "secret"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        cmd_set(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            "APP_DB_PASSWORD".to_string(),
+            "old-secret".to_string(),
+            false,
+            true,
+            &ResolveCtx {
+                keydir: Some(dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        cmd_rekey(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            None,
+            true,
+            &ResolveCtx {
+                keydir: Some(dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let new_recipient = root.get("_recipient_key").unwrap();
+        let new_key_id = new_recipient
+            .get("key_id")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert_ne!(new_key_id, old_key_id);
+        assert!(dir.join(new_key_id).exists());
+        assert_eq!(root.as_object().unwrap().keys().next().map(String::as_str), Some("_recipient_key"));
+
+        let (decrypted, pair_mismatch) = decrypt_json_with_sidecar(
+            Some(&path),
+            &ResolveCtx {
+                keydir: Some(dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        assert!(!pair_mismatch);
+        assert_eq!(
+            decrypted
+                .get("environment")
+                .and_then(|v| v.get("APP_DB_PASSWORD"))
+                .and_then(Value::as_str),
+            Some("old-secret")
+        );
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cmd_rotate_key_uses_explicit_recipient_for_v3() {
+        let dir = unique_path("rotate-key-v3-explicit-dir", "");
+        let source_cfg = empty_source_cfg();
+        fs::create_dir_all(&dir).unwrap();
+
+        let source_bundle = encjson_core::crypto::generate_v3_key_bundle().unwrap();
+        let source_recipient = source_bundle.to_recipient_key();
+        save_v3_key_bundle(&source_bundle, Some(&dir)).unwrap();
+
+        let target_bundle = encjson_core::crypto::generate_v3_key_bundle().unwrap();
+        let target_key_id = target_bundle.key_id.clone();
+        save_v3_key_bundle(&target_bundle, Some(&dir)).unwrap();
+
+        let path = unique_path("rotate-key-v3-explicit-file", ".json");
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                    "_recipient_key": source_recipient,
+                    "environment": {
+                    "APP_DB_PASSWORD": "secret"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        cmd_set(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            "APP_DB_PASSWORD".to_string(),
+            "explicit-secret".to_string(),
+            false,
+            true,
+            &ResolveCtx {
+                keydir: Some(dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        cmd_rekey(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            Some(&target_key_id),
+            true,
+            &ResolveCtx {
+                keydir: Some(dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let new_key_id = root
+            .get("_recipient_key")
+            .and_then(|v| v.get("key_id"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert_eq!(new_key_id, target_key_id);
+
+        let (decrypted, pair_mismatch) = decrypt_json_with_sidecar(
+            Some(&path),
+            &ResolveCtx {
+                keydir: Some(dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+        assert!(!pair_mismatch);
+        assert_eq!(
+            decrypted
+                .get("environment")
+                .and_then(|v| v.get("APP_DB_PASSWORD"))
+                .and_then(Value::as_str),
+            Some("explicit-secret")
+        );
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cmd_init_v3_creates_recipient_key_file_and_template() {
+        let _guard = cwd_lock().lock().unwrap();
+        let prev_dir = std::env::current_dir().unwrap();
+        let work_dir = unique_path("init-v3-work", "");
+        let key_dir = unique_path("init-v3-keys", "");
+        fs::create_dir_all(&work_dir).unwrap();
+        fs::create_dir_all(&key_dir).unwrap();
+        std::env::set_current_dir(&work_dir).unwrap();
+
+        cmd_init(Some(key_dir.clone()), EncJsonApiVersion::V3_0, true).unwrap();
+
+        let root: Value = serde_json::from_str(&fs::read_to_string(work_dir.join("env.secured.json")).unwrap()).unwrap();
+        let recipient = root.get("_recipient_key").unwrap();
+        let key_id = recipient.get("key_id").and_then(Value::as_str).unwrap();
+        assert!(key_dir.join(key_id).exists());
+        assert_eq!(recipient.get("version").and_then(Value::as_u64), Some(3));
+
+        std::env::set_current_dir(prev_dir).unwrap();
+        let _ = fs::remove_dir_all(work_dir);
+        let _ = fs::remove_dir_all(key_dir);
+    }
+
+    #[test]
+    fn cmd_render_k8s_pair_secret_outputs_v3_runtime_env_secret() {
+        let path = unique_path("render-k8s-v3", ".json");
+        let key_dir = unique_path("render-k8s-v3-keys", "");
+        let output = unique_path("render-k8s-v3", ".yaml");
+        fs::create_dir_all(&key_dir).unwrap();
+        let source_cfg = empty_source_cfg();
+
+        let bundle = encjson_core::crypto::generate_v3_key_bundle().unwrap();
+        let recipient = bundle.to_recipient_key();
+        save_v3_key_bundle(&bundle, Some(&key_dir)).unwrap();
+
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                    "_recipient_key": recipient,
+                    "environment": {
+                    "APP_DB_PASSWORD": "secret"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        cmd_render_k8s_pair_secret(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            "my-secret".to_string(),
+            Some("demo".to_string()),
+            "PUBLIC_KEY".to_string(),
+            "PRIVATE_KEY".to_string(),
+            Some(output.clone()),
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let manifest: K8sSecretManifest =
+            serde_yaml_ng::from_str(&fs::read_to_string(&output).unwrap()).unwrap();
+        assert_eq!(manifest.secret_type, "Opaque");
+        assert_eq!(manifest.metadata.name, "my-secret");
+        assert_eq!(manifest.metadata.namespace.as_deref(), Some("demo"));
+        assert_eq!(
+            manifest.data.get("ENCJSON_KEY_VERSION").unwrap(),
+            &encode_k8s_data("3")
+        );
+        assert_eq!(
+            manifest.data.get("ENCJSON_X25519_PUBLIC").unwrap(),
+            &encode_k8s_data(&bundle.x25519.public_hex)
+        );
+        assert_eq!(
+            manifest.data.get("ENCJSON_X25519_PRIVATE").unwrap(),
+            &encode_k8s_data(&bundle.x25519.private_hex)
+        );
+        assert_eq!(
+            manifest.data.get("ENCJSON_MLKEM768_PUBLIC").unwrap(),
+            &encode_k8s_data(&bundle.mlkem768.public_b64)
+        );
+        assert_eq!(
+            manifest.data.get("ENCJSON_MLKEM768_PRIVATE").unwrap(),
+            &encode_k8s_data(&bundle.mlkem768.private_b64)
+        );
+        assert!(!manifest.data.contains_key("PUBLIC_KEY"));
+        assert!(!manifest.data.contains_key("PRIVATE_KEY"));
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(output);
+        let _ = fs::remove_dir_all(key_dir);
+    }
+
+    #[test]
+    fn cmd_render_k8s_pair_secret_keeps_legacy_shape_for_api_v2() {
+        let path = unique_path("render-k8s-v2", ".json");
+        let key_dir = unique_path("render-k8s-v2-keys", "");
+        let output = unique_path("render-k8s-v2", ".yaml");
+        fs::create_dir_all(&key_dir).unwrap();
+        let source_cfg = empty_source_cfg();
+
+        let (private_hex, public_hex) = encjson_core::crypto::generate_pair_consistent_key_pair();
+        save_private_key(&public_hex, &private_hex, Some(&key_dir)).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                    "_public_key": public_hex,
+                    "environment": {
+                    "APP_DB_PASSWORD": "secret"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        cmd_render_k8s_pair_secret(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            "legacy-secret".to_string(),
+            None,
+            "PUBLIC_KEY".to_string(),
+            "PRIVATE_KEY".to_string(),
+            Some(output.clone()),
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let manifest: K8sSecretManifest =
+            serde_yaml_ng::from_str(&fs::read_to_string(&output).unwrap()).unwrap();
+        assert_eq!(
+            manifest.data.get("PUBLIC_KEY").unwrap(),
+            &encode_k8s_data(&public_hex)
+        );
+        assert_eq!(
+            manifest.data.get("PRIVATE_KEY").unwrap(),
+            &encode_k8s_data(&private_hex)
+        );
+        assert!(!manifest.data.contains_key("ENCJSON_KEY_VERSION"));
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(output);
+        let _ = fs::remove_dir_all(key_dir);
+    }
+
+    #[test]
+    fn cmd_migrate_format_migrates_legacy_file_to_v3() {
+        let key_dir = unique_path("migrate-v3-keys", "");
+        fs::create_dir_all(&key_dir).unwrap();
+        let path = unique_path("migrate-v3-file", ".secured.json");
+        let source_cfg = empty_source_cfg();
+
+        let (legacy_private, legacy_public) = encjson_core::crypto::generate_pair_consistent_key_pair();
+        save_private_key(&legacy_public, &legacy_private, Some(&key_dir)).unwrap();
+
+        fs::write(
+            &path,
+            format!(
+                r#"{{"_public_key":"{legacy_public}","environment":{{"APP_DB_PASSWORD":"secret"}}}}"#
+            ),
+        )
+        .unwrap();
+
+        cmd_encrypt(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            true,
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+            false,
+        )
+        .unwrap();
+
+        let new_bundle = encjson_core::crypto::generate_v3_key_bundle().unwrap();
+        let new_key_id = new_bundle.key_id.clone();
+        save_v3_key_bundle(&new_bundle, Some(&key_dir)).unwrap();
+
+        cmd_migrate_format(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            EncJsonApiVersion::V3_0,
+            Some(&new_key_id),
+            true,
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let migrated: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(migrated.get("_public_key").is_none());
+        assert_eq!(
+            migrated
+                .get("_recipient_key")
+                .and_then(|v| v.get("key_id"))
+                .and_then(Value::as_str),
+            Some(new_key_id.as_str())
+        );
+        assert!(
+            migrated
+                .get("environment")
+                .and_then(|v| v.get("APP_DB_PASSWORD"))
+                .and_then(Value::as_str)
+                .unwrap()
+                .starts_with("EncJson[@api=3.0:@box=")
+        );
+
+        let (decrypted, pair_mismatch) = decrypt_json_with_sidecar(
+            Some(&path),
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+        assert!(!pair_mismatch);
+        assert_eq!(
+            decrypted
+                .get("environment")
+                .and_then(|v| v.get("APP_DB_PASSWORD"))
+                .and_then(Value::as_str),
+            Some("secret")
+        );
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(key_dir);
+    }
+
+    #[test]
+    fn cmd_migrate_format_rejects_v3_source_file() {
+        let key_dir = unique_path("migrate-v3-reject-keys", "");
+        fs::create_dir_all(&key_dir).unwrap();
+        let path = unique_path("migrate-v3-reject-file", ".secured.json");
+        let source_cfg = empty_source_cfg();
+
+        let bundle = encjson_core::crypto::generate_v3_key_bundle().unwrap();
+        let recipient = bundle.to_recipient_key();
+        save_v3_key_bundle(&bundle, Some(&key_dir)).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                    "_recipient_key": recipient,
+                    "environment": {
+                    "APP_DB_PASSWORD": "secret"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let err = cmd_migrate_format(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            EncJsonApiVersion::V3_0,
+            Some(&bundle.key_id),
+            true,
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Unsupported `_recipient_key`"));
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(key_dir);
+    }
+
+    #[test]
+    fn cmd_migrate_format_generates_v3_bundle_when_recipient_missing() {
+        let key_dir = unique_path("migrate-v3-auto-keys", "");
+        fs::create_dir_all(&key_dir).unwrap();
+        let path = unique_path("migrate-v3-auto-file", ".secured.json");
+        let source_cfg = empty_source_cfg();
+
+        let (legacy_private, legacy_public) = encjson_core::crypto::generate_pair_consistent_key_pair();
+        save_private_key(&legacy_public, &legacy_private, Some(&key_dir)).unwrap();
+
+        fs::write(
+            &path,
+            format!(
+                r#"{{"_public_key":"{legacy_public}","environment":{{"APP_DB_PASSWORD":"secret"}}}}"#
+            ),
+        )
+        .unwrap();
+
+        cmd_encrypt(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            true,
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+            false,
+        )
+        .unwrap();
+
+        let before = list_public_keys(Some(&key_dir)).unwrap();
+
+        cmd_migrate_format(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            EncJsonApiVersion::V3_0,
+            None,
+            true,
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        let after = list_public_keys(Some(&key_dir)).unwrap();
+        assert_eq!(after.len(), before.len() + 1);
+
+        let migrated: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let new_key_id = migrated
+            .get("_recipient_key")
+            .and_then(|v| v.get("key_id"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(key_dir.join(new_key_id).exists());
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(key_dir);
     }
 
     #[test]
@@ -3550,7 +4775,6 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(bundle.public_key.is_none());
         let bytes = decode_asset_base64(
             "ssl/cert.pem",
             &bundle.assets.get("ssl/cert.pem").unwrap().content,
@@ -3707,7 +4931,6 @@ mod tests {
             },
         );
         let bundle = AssetsBundle {
-            public_key: None,
             assets,
         };
 
@@ -3729,7 +4952,6 @@ mod tests {
             },
         );
         let bundle = AssetsBundle {
-            public_key: None,
             assets,
         };
 
@@ -4041,5 +5263,82 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err}").contains("requires key 'ca.crt'"));
+    }
+
+    #[test]
+    fn build_register_payload_from_local_key_uses_legacy_private_hex() {
+        let key_dir = unique_path("register-legacy-keys", "");
+        fs::create_dir_all(&key_dir).unwrap();
+        let source_cfg = empty_source_cfg();
+
+        let (private_hex, public_hex) = encjson_core::crypto::generate_pair_consistent_key_pair();
+        save_private_key(&public_hex, &private_hex, Some(&key_dir)).unwrap();
+
+        let payload = build_register_payload_from_local_key(
+            &public_hex,
+            "demo".to_string(),
+            "legacy note".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        match payload {
+            RegisterPayload::Legacy(payload) => {
+                assert_eq!(payload.public_hex, public_hex);
+                assert_eq!(payload.private_hex, private_hex);
+                assert_eq!(payload.tenant, "demo");
+                assert_eq!(payload.note, "legacy note");
+                assert_eq!(payload.tags, vec!["a", "b"]);
+            }
+            _ => panic!("expected legacy register payload"),
+        }
+
+        let _ = fs::remove_dir_all(key_dir);
+    }
+
+    #[test]
+    fn build_register_payload_from_local_key_uses_v3_bundle() {
+        let key_dir = unique_path("register-v3-keys", "");
+        fs::create_dir_all(&key_dir).unwrap();
+        let source_cfg = empty_source_cfg();
+
+        let bundle = encjson_core::crypto::generate_v3_key_bundle().unwrap();
+        save_v3_key_bundle(&bundle, Some(&key_dir)).unwrap();
+
+        let payload = build_register_payload_from_local_key(
+            &bundle.key_id,
+            "demo".to_string(),
+            "bundle note".to_string(),
+            vec!["x".to_string()],
+            &ResolveCtx {
+                keydir: Some(key_dir.clone()),
+                private_key: None,
+                source_cfg: &source_cfg,
+                legacy_mode: true,
+            },
+        )
+        .unwrap();
+
+        match payload {
+            RegisterPayload::V3(payload) => {
+                assert_eq!(payload.key_id, bundle.key_id);
+                assert_eq!(payload.version, 3);
+                assert_eq!(payload.algorithm, bundle.algorithm);
+                assert_eq!(payload.tenant, "demo");
+                assert_eq!(payload.note, "bundle note");
+                assert_eq!(payload.tags, vec!["x"]);
+                assert_eq!(payload.public_bundle.components.len(), 2);
+                assert_eq!(payload.private_bundle.components.len(), 2);
+            }
+            _ => panic!("expected v3 register payload"),
+        }
+
+        let _ = fs::remove_dir_all(key_dir);
     }
 }

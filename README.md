@@ -296,6 +296,7 @@ This project now uses a unified model: every supported runtime environment varia
 | `ENCJSON_TENANT` | `--tenant` (global) |
 | `ENCJSON_ENV` | `--env` (global) |
 | `ENCJSON_SCOPE_REQUIRED` | `--scope-required` (global) |
+| `ENCJSON_LEGACY_MODE` | `--legacy-mode` (global) |
 | `ENCJSON_KEY_SOURCE` | `--key-source` (global: `env|dir|remote-mtls|vault|conjur`) |
 | `ENCJSON_REMOTE_KEYS_URL` | `--remote-keys-url` (global) |
 | `ENCJSON_REMOTE_TLS_CERT_FILE` | `--remote-tls-cert-file` (global) |
@@ -503,11 +504,16 @@ encjson env -f env.secured.json -k /etc/encjson
 
 ### Register: secure private key input
 
-For explicit key registration to keys server, prefer secure private key input:
+For explicit key registration to keys server, prefer secure private key input.
+
+`KEY_REF` means:
+
+- legacy `api=2.0`: `<public_hex>`
+- `api=3.0`: `<key_id>`
 
 ```bash
-encjson register <PUBLIC_HEX> \
-  --tenant tsm \
+encjson register <KEY_REF> \
+  --tenant app \
   --note "bootstrap" \
   --private-key-file /secure/path/private.key \
   --keys-url http://127.0.0.1:8080 \
@@ -535,6 +541,7 @@ Sessions file:
 
 - macOS: `~/Library/Application Support/encjson/sessions.json`
 - Linux: `~/.config/encjson/sessions.json`
+- Windows: `%APPDATA%\\encjson\\sessions.json`
 - perms `0600` (Unix)
 
 ### 1. Generate key pair (`init`)
@@ -543,22 +550,42 @@ Sessions file:
 encjson init
 ```
 
-Typical output:
+Default behavior:
+
+- `encjson init` creates a new `api=3.0` hybrid key bundle
+- `encjson init --api 2.0` creates the legacy key pair explicitly
+
+Typical `api=3.0` output:
 
 ```text
-Generated key pair (hex):
- => 🍺 public:  91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640
- => 🔑 private: 24e55b25c598d4df78387de983b455144e197e3e63239d0c1fc92f862bbd7c0c
- => 💾 saved to: /home/user/.config/encjson/91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640
+OK init
+  api       : 3.0
+  key_id    : 2b29881f6f08063315b232a00a0f6276e1eaac4d76a0f16a1d435093f77890f8
+  algorithm : ml-kem-768+x25519
+  key file  : /home/user/.local/share/encjson/2b29881f6f08063315b232a00a0f6276e1eaac4d76a0f16a1d435093f77890f8
 ```
 
-By default, the private key is saved to:
+Legacy `api=2.0` output (`encjson init --api 2.0`):
 
-- `$ENCJSON_KEYDIR/<public_hex>` if `ENCJSON_KEYDIR` is set, or
-- a **dirs-based OS config directory** otherwise:
-  - macOS: `~/Library/Application Support/encjson/<public_hex>`
-  - Linux: `~/.config/encjson/<public_hex>`
-  - Windows: `%APPDATA%\\encjson\\<public_hex>` (or user profile fallback)
+```text
+OK init
+  public key : 91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640
+  private key: 24e55b25c598d4df78387de983b455144e197e3e63239d0c1fc92f862bbd7c0c
+  key file   : /home/user/.local/share/encjson/91c359808554f94d4a84208630f386d65a70fb9f843756953cf83a5c1b488640
+```
+
+By default, key material is saved to:
+
+- `$ENCJSON_KEYDIR/<filename>` if `ENCJSON_KEYDIR` is set, or
+- a **dirs-based OS data directory** otherwise:
+  - macOS: `~/Library/Application Support/encjson/<filename>`
+  - Linux: `~/.local/share/encjson/<filename>`
+  - Windows: `%APPDATA%\\encjson\\<filename>` (or user profile fallback)
+
+Where `<filename>` is:
+
+- legacy `api=2.0`: `<public_hex>`
+- `api=3.0`: `<key_id>`
 
 You can override the directory:
 
@@ -568,13 +595,13 @@ encjson init -k /etc/encjson
 
 ### 1.1 Show key info for file (`info`)
 
-Use `info` when you need to inspect which key pair a secured file currently uses:
+Use `info` when you need to inspect which key material a secured file currently uses:
 
 ```bash
 encjson info -f env.secured.json
 ```
 
-Example output:
+Example `api=2.0` output:
 
 ```text
 public_key: 5be9bd0c23a4b402d7f8549147002047359d182be8452f7fcc607ffd3387a732
@@ -583,6 +610,16 @@ pair_consistent: true
 ```
 
 `pair_consistent: false` means the file still uses a legacy inconsistent pair.
+
+Example `api=3.0` output includes `_recipient_key` metadata such as:
+
+```text
+version: 3
+key_id: 2b29881f6f08063315b232a00a0f6276e1eaac4d76a0f16a1d435093f77890f8
+algorithm: ml-kem-768+x25519
+x25519_public_hex: ...
+mlkem768_public_b64: ...
+```
 
 ### 2. Encrypt a JSON file (`encrypt`)
 
@@ -757,11 +794,11 @@ You can decrypt + apply sidecar schema transforms and directly render Kubernetes
 ```bash
 encjson render-k8s-secret \
   -f mtls.secured.json \
-  --name mtls-test-tsm-dms-tsm-dms \
+  --name mtls-test-api-api \
   --namespace nac-test \
-  --from-env MTLS_TEST_TSM_DMS_TLS_CRT=tls.crt \
-  --from-env MTLS_TEST_TSM_DMS_TLS_KEY=tls.key \
-  --from-env MTLS_TEST_TSM_DMS_CA_CRT=ca.crt
+  --from-env MTLS_TEST_API_TLS_CRT=tls.crt \
+  --from-env MTLS_TEST_API_TLS_KEY=tls.key \
+  --from-env MTLS_TEST_API_CA_CRT=ca.crt
 ```
 
 - If `--from-env` is omitted, all string keys from `environment`/`env` are included.
@@ -770,21 +807,24 @@ encjson render-k8s-secret \
 - For `kubernetes.io/tls`, required keys are: `ca.crt`, `tls.crt`, `tls.key`.
 - Optional override: `--secret-type Opaque`
 
-Render key pair secret (`_public_key` + resolved private key):
+Render key material secret:
+
+- `api=2.0`: legacy `_public_key` + resolved private key
+- `api=3.0`: expanded runtime env vars derived from `_recipient_key`
 
 ```bash
 encjson render-k8s-pair-secret \
   -f env.secured.json \
-  --name tsm-secrets \
+  --name app-secrets \
   --namespace nac-test
 ```
 
-Optional key names:
+Optional key names (`api=2.0` only):
 
 ```bash
 encjson render-k8s-pair-secret \
   -f env.secured.json \
-  --name tsm-secrets \
+  --name app-secrets \
   --namespace nac-test \
   --public-key-name public-key \
   --private-key-name private-key
@@ -796,12 +836,12 @@ Multi-secret mode (`---` multi-doc YAML):
 encjson render-k8s-secret \
   -f mtls.secured.json \
   --namespace nac-test \
-  --from-env-secret MTLS_TEST_TSM_DMS_TLS_CRT=mtls-test-tsm-dms-tsm-dms/tls.crt \
-  --from-env-secret MTLS_TEST_TSM_DMS_TLS_KEY=mtls-test-tsm-dms-tsm-dms/tls.key \
-  --from-env-secret MTLS_TEST_TSM_DMS_CA_CRT=mtls-test-tsm-dms-tsm-dms/ca.crt \
-  --from-env-secret MTLS_TEST_TSM_UI_TLS_CRT=mtls-test-tsm-ui-tsm-ui/tls.crt \
-  --from-env-secret MTLS_TEST_TSM_UI_TLS_KEY=mtls-test-tsm-ui-tsm-ui/tls.key \
-  --from-env-secret MTLS_TEST_TSM_UI_CA_CRT=mtls-test-tsm-ui-tsm-ui/ca.crt
+  --from-env-secret MTLS_TEST_API_TLS_CRT=mtls-test-api-api/tls.crt \
+  --from-env-secret MTLS_TEST_API_TLS_KEY=mtls-test-api-api/tls.key \
+  --from-env-secret MTLS_TEST_API_CA_CRT=mtls-test-api-api/ca.crt \
+  --from-env-secret MTLS_TEST_WEB_TLS_CRT=mtls-test-web-web/tls.crt \
+  --from-env-secret MTLS_TEST_WEB_TLS_KEY=mtls-test-web-web/tls.key \
+  --from-env-secret MTLS_TEST_WEB_CA_CRT=mtls-test-web-web/ca.crt
 ```
 
 - `--from-env-secret` format: `ENV_KEY=secretName/secretKey`
@@ -954,7 +994,7 @@ Notes:
 - Values are shown decrypted so you can edit them easily.
 - Only edited values are re-encrypted; untouched values keep their original ciphertext.
 - On exit you will be prompted to `Save` or `Discard` changes.
-- Works even if `_public_key` is missing (treated as plain JSON).
+- Works even if `_public_key` / `_recipient_key` is missing (treated as plain JSON).
 - `Values` list shows `<empty>` or `<spaces:N>` for empty/whitespace-only values.
 - Edit modal includes a hex preview so trailing spaces and non-printable bytes are visible.
 - Keys: `Up/Down` select, `Shift+Up/Down` move, `e` edit, `/` filter (key/value), `a` add (`A` adds above cursor), `r` rename, `d` delete, `t` sort, `v` diff, `s` save, `q` quit.
@@ -966,7 +1006,7 @@ Screen-style examples:
 ```text
 Editing env.secured.json in /path/to/project | modified 2025-02-14 10:32:11 +01:00
 ┌ Keys ────────────────────────────────────┐┌ Values ─────────────────────────────────┐
-│ > SPRING_DATASOURCE_USERNAME             ││ > tsm_admin                             │
+│ > SPRING_DATASOURCE_USERNAME             ││ > app_admin                             │
 │   SPRING_DATASOURCE_PASSWORD             ││   <empty>                               │
 │   KAFKA_SASL_JAAS_CONFIG                 ││   org.apache.kafka...                   │
 └──────────────────────────────────────────┘└─────────────────────────────────────────┘
@@ -988,13 +1028,18 @@ The tool finds the private key in this order:
 
 1. If `ENCJSON_PRIVATE_KEY` is set and non-empty, it is used directly as a 64-hex string.
 2. If `ENCJSON_KEYS_URL` is set **and** `ENCJSON_ACCESS_TOKEN` is present, it fetches the key remotely.
-3. Otherwise it looks up a file named `<public_hex>` in:
+3. Otherwise it looks up a file named `<filename>` in:
    - the `-k/--keydir` CLI argument (if provided), or
    - `$ENCJSON_KEYDIR` (if set), or
-   - the dirs-based config directory:
+   - the dirs-based data directory:
      - macOS: `~/Library/Application Support/encjson`
-     - Linux: `~/.config/encjson`
+     - Linux: `~/.local/share/encjson`
      - Windows: `%APPDATA%\\encjson`
+
+Where `<filename>` is either:
+
+- legacy `api=2.0`: `<public_hex>`
+- `api=3.0`: `<key_id>`
 
 If no key can be found, the command fails with a clear error.
 
@@ -1004,7 +1049,7 @@ If no key can be found, the command fails with a clear error.
 
 ### Emoji output in `init`
 
-On Unix-like systems, `encjson init` prints some small emoji decorations:
+On Unix-like systems, legacy `encjson init --api 2.0` historically printed some small emoji decorations:
 
 ```text
 Generated key pair (hex):
@@ -1037,9 +1082,9 @@ This makes the output more predictable in logs and on terminals with limited fon
 The default key directory is determined as follows:
 
 1. If `ENCJSON_KEYDIR` is set, it is always used (on all platforms).
-2. Otherwise use OS config directory (via `dirs` crate):
+2. Otherwise use OS data directory (via `dirs` crate):
    - macOS: `~/Library/Application Support/encjson`
-   - Linux: `~/.config/encjson`
+   - Linux: `~/.local/share/encjson`
    - Windows: `%APPDATA%\\encjson` (or user profile fallback)
 
 In practice, on a “normal” Windows 10/11 installation, the default ends up under the user’s profile directory, e.g.:
@@ -1054,6 +1099,11 @@ If you want complete control (for example, to share a key directory between WSL,
 
 On startup, if `~/.encjson` exists and the new dirs-based directory does not,
 keys are migrated automatically (only files with hex names).
+
+Note: sessions and key files intentionally use different OS-standard locations:
+
+- sessions: config directory (`sessions.json`)
+- key files: data directory (`<public_hex>` for `api=2.0`, `<key_id>` for `api=3.0`)
 
 ## Migration from the Crystal version
 
