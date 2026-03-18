@@ -1207,7 +1207,7 @@ and choose which one to symlink as `encjson` based on an environment variable (e
 
 ## License
 
-AGPLv3 License - see [LICENSE](LICENSE) file for details
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ## Author
 
