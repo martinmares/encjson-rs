@@ -408,8 +408,7 @@ pub fn generate_v3_key_bundle() -> Result<LocalKeyFileV3, CryptoError> {
             },
         ],
     };
-    let key_id =
-        compute_key_id(&public_bundle).map_err(|e| CryptoError::Invalid(e.to_string()))?;
+    let key_id = compute_key_id(&public_bundle).map_err(|e| CryptoError::Invalid(e.to_string()))?;
     public_bundle.key_id = key_id.clone();
 
     let _private_bundle = PrivateBundle {

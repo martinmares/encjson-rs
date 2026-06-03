@@ -292,15 +292,21 @@ pub fn load_from_source(options: &KeySourceOptions) -> Result<LoadedKeyPair, Key
             load_from_remote_mtls(cfg)
         }
         KeySourceKind::Vault => {
-            let cfg = options.vault.as_ref().ok_or(KeySourceError::MissingConfig {
-                name: "vault config",
-            })?;
+            let cfg = options
+                .vault
+                .as_ref()
+                .ok_or(KeySourceError::MissingConfig {
+                    name: "vault config",
+                })?;
             load_from_vault(cfg)
         }
         KeySourceKind::Conjur => {
-            let cfg = options.conjur.as_ref().ok_or(KeySourceError::MissingConfig {
-                name: "conjur config",
-            })?;
+            let cfg = options
+                .conjur
+                .as_ref()
+                .ok_or(KeySourceError::MissingConfig {
+                    name: "conjur config",
+                })?;
             load_from_conjur(cfg)
         }
         KeySourceKind::Cli => Err(KeySourceError::SourceUnavailable {
@@ -412,30 +418,34 @@ pub fn load_from_remote_mtls(cfg: &RemoteMtlsConfig) -> Result<LoadedKeyPair, Ke
         });
     }
 
-    let cert_pem = std::fs::read(&cfg.client_cert_path).map_err(|_| KeySourceError::MissingConfig {
-        name: "ENCJSON_REMOTE_TLS_CERT_FILE",
-    })?;
-    let key_pem = std::fs::read(&cfg.client_key_path).map_err(|_| KeySourceError::MissingConfig {
-        name: "ENCJSON_REMOTE_TLS_KEY_FILE",
-    })?;
+    let cert_pem =
+        std::fs::read(&cfg.client_cert_path).map_err(|_| KeySourceError::MissingConfig {
+            name: "ENCJSON_REMOTE_TLS_CERT_FILE",
+        })?;
+    let key_pem =
+        std::fs::read(&cfg.client_key_path).map_err(|_| KeySourceError::MissingConfig {
+            name: "ENCJSON_REMOTE_TLS_KEY_FILE",
+        })?;
 
     let mut identity_pem = Vec::with_capacity(cert_pem.len() + key_pem.len() + 1);
     identity_pem.extend_from_slice(&cert_pem);
     identity_pem.push(b'\n');
     identity_pem.extend_from_slice(&key_pem);
 
-    let identity = Identity::from_pem(&identity_pem).map_err(|_| KeySourceError::InvalidKeyMaterial {
-        reason: "invalid remote mTLS identity PEM",
-    })?;
+    let identity =
+        Identity::from_pem(&identity_pem).map_err(|_| KeySourceError::InvalidKeyMaterial {
+            reason: "invalid remote mTLS identity PEM",
+        })?;
 
     let mut builder = ClientBuilder::new().identity(identity);
     if let Some(ca_path) = &cfg.ca_cert_path {
         let ca_pem = std::fs::read(ca_path).map_err(|_| KeySourceError::MissingConfig {
             name: "ENCJSON_REMOTE_TLS_CA_FILE",
         })?;
-        let ca = Certificate::from_pem(&ca_pem).map_err(|_| KeySourceError::InvalidKeyMaterial {
-            reason: "invalid remote mTLS CA PEM",
-        })?;
+        let ca =
+            Certificate::from_pem(&ca_pem).map_err(|_| KeySourceError::InvalidKeyMaterial {
+                reason: "invalid remote mTLS CA PEM",
+            })?;
         builder = builder.add_root_certificate(ca);
     }
 
@@ -445,21 +455,24 @@ pub fn load_from_remote_mtls(cfg: &RemoteMtlsConfig) -> Result<LoadedKeyPair, Ke
             kind: KeySourceKind::RemoteMtls,
         })?;
 
-    let resp = client
-        .get(cfg.url.trim())
-        .send()
-        .map_err(|_| KeySourceError::SourceUnavailable {
-            kind: KeySourceKind::RemoteMtls,
-        })?;
+    let resp =
+        client
+            .get(cfg.url.trim())
+            .send()
+            .map_err(|_| KeySourceError::SourceUnavailable {
+                kind: KeySourceKind::RemoteMtls,
+            })?;
     if !resp.status().is_success() {
         return Err(KeySourceError::SourceUnavailable {
             kind: KeySourceKind::RemoteMtls,
         });
     }
 
-    let payload: Value = resp.json().map_err(|_| KeySourceError::InvalidKeyMaterial {
-        reason: "invalid remote JSON payload",
-    })?;
+    let payload: Value = resp
+        .json()
+        .map_err(|_| KeySourceError::InvalidKeyMaterial {
+            reason: "invalid remote JSON payload",
+        })?;
     parse_remote_payload(&payload)
 }
 
@@ -508,9 +521,11 @@ pub fn load_from_vault(cfg: &VaultConfig) -> Result<LoadedKeyPair, KeySourceErro
         });
     }
 
-    let payload: Value = resp.json().map_err(|_| KeySourceError::InvalidKeyMaterial {
-        reason: "invalid vault JSON payload",
-    })?;
+    let payload: Value = resp
+        .json()
+        .map_err(|_| KeySourceError::InvalidKeyMaterial {
+            reason: "invalid vault JSON payload",
+        })?;
     parse_vault_payload(&payload, public_field, private_field)
 }
 
@@ -551,9 +566,10 @@ pub fn load_from_conjur(cfg: &ConjurConfig) -> Result<LoadedKeyPair, KeySourceEr
         let ca_pem = std::fs::read(ca_path).map_err(|_| KeySourceError::MissingConfig {
             name: "ENCJSON_CONJUR_CA_CERT_FILE",
         })?;
-        let ca = Certificate::from_pem(&ca_pem).map_err(|_| KeySourceError::InvalidKeyMaterial {
-            reason: "invalid conjur CA PEM",
-        })?;
+        let ca =
+            Certificate::from_pem(&ca_pem).map_err(|_| KeySourceError::InvalidKeyMaterial {
+                reason: "invalid conjur CA PEM",
+            })?;
         builder = builder.add_root_certificate(ca);
     }
     let client = builder
@@ -644,14 +660,16 @@ pub fn load_from_conjur(cfg: &ConjurConfig) -> Result<LoadedKeyPair, KeySourceEr
 }
 
 fn parse_remote_payload(payload: &Value) -> Result<LoadedKeyPair, KeySourceError> {
-    let public_hex = extract_string(payload, &["public_hex", "public-key"])
-        .ok_or(KeySourceError::InvalidKeyMaterial {
+    let public_hex = extract_string(payload, &["public_hex", "public-key"]).ok_or(
+        KeySourceError::InvalidKeyMaterial {
             reason: "remote payload missing public key field",
-        })?;
-    let private_hex = extract_string(payload, &["private_hex", "private-key"])
-        .ok_or(KeySourceError::InvalidKeyMaterial {
+        },
+    )?;
+    let private_hex = extract_string(payload, &["private_hex", "private-key"]).ok_or(
+        KeySourceError::InvalidKeyMaterial {
             reason: "remote payload missing private key field",
-        })?;
+        },
+    )?;
 
     validate_key_pair(&public_hex, &private_hex)?;
     Ok(LoadedKeyPair {
@@ -665,14 +683,16 @@ fn parse_vault_payload(
     public_field: &str,
     private_field: &str,
 ) -> Result<LoadedKeyPair, KeySourceError> {
-    let root_data = payload
+    let root_data = payload.get("data").and_then(Value::as_object).ok_or(
+        KeySourceError::InvalidKeyMaterial {
+            reason: "vault payload missing data object",
+        },
+    )?;
+
+    let nested = root_data
         .get("data")
         .and_then(Value::as_object)
-        .ok_or(KeySourceError::InvalidKeyMaterial {
-            reason: "vault payload missing data object",
-        })?;
-
-    let nested = root_data.get("data").and_then(Value::as_object).unwrap_or(root_data);
+        .unwrap_or(root_data);
 
     let public_hex = nested
         .get(public_field)

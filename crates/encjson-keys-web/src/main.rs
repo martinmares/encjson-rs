@@ -38,9 +38,18 @@ enum AuthMode {
 struct Args {
     #[arg(long, env = "ENCJSON_KEYS_WEB_BIND", default_value = "127.0.0.1:8189")]
     bind: String,
-    #[arg(long, env = "ENCJSON_KEYS_WEB_KEYS_SERVER", default_value = "http://127.0.0.1:8080")]
+    #[arg(
+        long,
+        env = "ENCJSON_KEYS_WEB_KEYS_SERVER",
+        default_value = "http://127.0.0.1:8080"
+    )]
     keys_server: String,
-    #[arg(long, env = "ENCJSON_KEYS_WEB_AUTH_MODE", value_enum, default_value = "local")]
+    #[arg(
+        long,
+        env = "ENCJSON_KEYS_WEB_AUTH_MODE",
+        value_enum,
+        default_value = "local"
+    )]
     auth_mode: AuthMode,
     #[arg(long, env = "ENCJSON_KEYS_WEB_OPEN")]
     open: bool,
@@ -193,10 +202,9 @@ async fn main() -> Result<()> {
     let oidc = match args.auth_mode {
         AuthMode::Local => None,
         AuthMode::Oidc => {
-            let issuer = args
-                .oidc_issuer
-                .clone()
-                .ok_or_else(|| anyhow!("missing --oidc-issuer (or ENCJSON_KEYS_WEB_OIDC_ISSUER)"))?;
+            let issuer = args.oidc_issuer.clone().ok_or_else(|| {
+                anyhow!("missing --oidc-issuer (or ENCJSON_KEYS_WEB_OIDC_ISSUER)")
+            })?;
             let client_id = args.oidc_client_id.clone().ok_or_else(|| {
                 anyhow!("missing --oidc-client-id (or ENCJSON_KEYS_WEB_OIDC_CLIENT_ID)")
             })?;
@@ -266,7 +274,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-
 fn app_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(root))
@@ -283,15 +290,24 @@ fn app_router(state: AppState) -> Router {
         .route("/api/v1/ui/events", get(api_events))
         .route("/api/v1/ui/bootstrap/import", post(api_bootstrap_import))
         .route("/api/v1/ui/keys", get(api_keys))
-        .route("/api/v1/ui/keys/{public_hex}", get(api_key_detail).patch(api_patch_key))
+        .route(
+            "/api/v1/ui/keys/{public_hex}",
+            get(api_key_detail).patch(api_patch_key),
+        )
         .route("/api/v1/ui/keys/reencrypt", post(api_reencrypt))
-        .route("/api/v1/ui/requests", get(api_requests).post(api_create_request))
+        .route(
+            "/api/v1/ui/requests",
+            get(api_requests).post(api_create_request),
+        )
         .route(
             "/api/v1/ui/requests/{id}/approve",
             post(api_approve_request),
         )
         .route("/api/v1/ui/requests/{id}/reject", post(api_reject_request))
-        .route("/api/v1/ui/tenants", get(api_tenants).post(api_create_tenant))
+        .route(
+            "/api/v1/ui/tenants",
+            get(api_tenants).post(api_create_tenant),
+        )
         .route(
             "/api/v1/ui/tenants/{name}",
             patch(api_rename_tenant).delete(api_delete_tenant),
@@ -371,14 +387,17 @@ async fn ui_login(State(state): State<AppState>) -> Response {
         },
     );
 
-    let redirect_uri = format!("{}/ui/callback", oidc.cfg.redirect_base_url.trim_end_matches('/'));
+    let redirect_uri = format!(
+        "{}/ui/callback",
+        oidc.cfg.redirect_base_url.trim_end_matches('/')
+    );
     let auth_url = format!(
         "{}/oauth2/authorize?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256&nonce={}",
         oidc.cfg.issuer.trim_end_matches('/'),
         encode(&oidc.cfg.client_id),
         encode(&redirect_uri),
         encode(&oidc.cfg.scopes),
-                urlencoding::encode(&state_token),
+        urlencoding::encode(&state_token),
         encode(&challenge),
         encode(&nonce),
     );
@@ -418,7 +437,10 @@ async fn ui_callback(
         return (StatusCode::BAD_REQUEST, "state expired").into_response();
     }
 
-    let redirect_uri = format!("{}/ui/callback", oidc.cfg.redirect_base_url.trim_end_matches('/'));
+    let redirect_uri = format!(
+        "{}/ui/callback",
+        oidc.cfg.redirect_base_url.trim_end_matches('/')
+    );
     let token_url = format!("{}/oauth2/token", oidc.cfg.issuer.trim_end_matches('/'));
 
     let mut form: Vec<(&str, String)> = vec![
@@ -491,7 +513,10 @@ async fn decode_id_token(oidc: &OidcState, token: &str) -> Result<Claims> {
     let key = if let Some(key) = key {
         key
     } else {
-        let jwks_url = format!("{}/.well-known/jwks.json", oidc.cfg.issuer.trim_end_matches('/'));
+        let jwks_url = format!(
+            "{}/.well-known/jwks.json",
+            oidc.cfg.issuer.trim_end_matches('/')
+        );
         let loaded = load_jwks(&oidc.http, &jwks_url).await?;
 
         let mut guard = oidc.jwks.lock().await;
@@ -512,10 +537,7 @@ async fn decode_id_token(oidc: &OidcState, token: &str) -> Result<Claims> {
     Ok(token.claims)
 }
 
-async fn load_jwks(
-    http: &reqwest::Client,
-    url: &str,
-) -> Result<HashMap<String, DecodingKey>> {
+async fn load_jwks(http: &reqwest::Client, url: &str) -> Result<HashMap<String, DecodingKey>> {
     let body = http.get(url).send().await?.text().await?;
     let set: JwkSet = serde_json::from_str(&body)?;
     let mut map = HashMap::new();
@@ -537,9 +559,10 @@ fn groups_to_vec(groups: Groups) -> Vec<String> {
 
 async fn ui_logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(oidc) = &state.oidc
-        && let Some(sid) = get_cookie(&headers, "encjson_keys_web") {
-            oidc.sessions.lock().await.remove(&sid);
-        }
+        && let Some(sid) = get_cookie(&headers, "encjson_keys_web")
+    {
+        oidc.sessions.lock().await.remove(&sid);
+    }
 
     let mut out = HeaderMap::new();
     out.insert(
@@ -597,9 +620,7 @@ async fn api_events(State(state): State<AppState>, headers: HeaderMap) -> Respon
             yield Ok::<Event, Infallible>(Event::default().event("requests.pending_count").data(payload.to_string()));
         }
     };
-    Sse::new(s)
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    Sse::new(s).keep_alive(KeepAlive::default()).into_response()
 }
 
 async fn api_bootstrap_import(
@@ -637,7 +658,9 @@ async fn api_keys(
         Ok(u) => u,
         Err(resp) => return resp,
     };
-    match proxy_get::<Vec<KeyItem>>(&state, "/api/v1/keys", &query, user.access_token.as_deref()).await {
+    match proxy_get::<Vec<KeyItem>>(&state, "/api/v1/keys", &query, user.access_token.as_deref())
+        .await
+    {
         Ok(v) => Json(v).into_response(),
         Err(resp) => resp,
     }
@@ -900,7 +923,9 @@ async fn ensure_user(
         }),
         AuthMode::Oidc => {
             let Some(oidc) = &state.oidc else {
-                return Err((StatusCode::INTERNAL_SERVER_ERROR, "OIDC is not configured").into_response());
+                return Err(
+                    (StatusCode::INTERNAL_SERVER_ERROR, "OIDC is not configured").into_response(),
+                );
             };
 
             let Some(sid) = get_cookie(headers, "encjson_keys_web") else {
@@ -1303,7 +1328,9 @@ mod tests {
             .to_string();
 
         let state_token_encoded = query_param(&location, "state").expect("missing state query");
-        let state_token = urlencoding::decode(&state_token_encoded).unwrap().to_string();
+        let state_token = urlencoding::decode(&state_token_encoded)
+            .unwrap()
+            .to_string();
 
         let auth_states = oidc_state.auth_states.lock().await;
         let auth_state = auth_states

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use encjson_core::{key_sources::require_policy_context, oidc_session, tui_ctl};
@@ -8,7 +8,11 @@ use std::path::Path;
 const APP_NAME: &str = "encjson-keys-ctl";
 
 #[derive(Parser, Debug)]
-#[command(name = "encjson-keys-ctl", version, about = "Admin TUI for encjson-keys-server")]
+#[command(
+    name = "encjson-keys-ctl",
+    version,
+    about = "Admin TUI for encjson-keys-server"
+)]
 struct Cli {
     #[arg(long, global = true)]
     insecure: Option<bool>,
@@ -18,7 +22,12 @@ struct Cli {
     tenant: Option<String>,
     #[arg(long = "env", global = true, env = "ENCJSON_ENV")]
     env_name: Option<String>,
-    #[arg(long, global = true, env = "ENCJSON_SCOPE_REQUIRED", default_value_t = false)]
+    #[arg(
+        long,
+        global = true,
+        env = "ENCJSON_SCOPE_REQUIRED",
+        default_value_t = false
+    )]
     scope_required: bool,
     #[command(subcommand)]
     command: Commands,
@@ -73,14 +82,11 @@ fn main() -> Result<()> {
     }
     match &cli.command {
         Commands::Tui => {
-            let keys_url = cli
-                .keys_url
-                .clone();
+            let keys_url = cli.keys_url.clone();
             let Some(keys_url) = keys_url else {
                 bail!("Missing keys server URL (use --keys-url or set ENCJSON_KEYS_URL)");
             };
-            let (session, server_name) =
-                run_async(oidc_session::ensure_valid_session(APP_NAME))?;
+            let (session, server_name) = run_async(oidc_session::ensure_valid_session(APP_NAME))?;
             oidc_session::save_session(APP_NAME, &server_name, session.clone())?;
             tui_ctl::run_ctl_ui_with_remote(keys_url, session.access_token)
                 .map_err(|err| anyhow!(err.to_string()))?;
@@ -179,11 +185,25 @@ fn handle_status() -> Result<()> {
     };
     let valid = oidc_session::is_session_valid(session);
     let expires_in = (session.expires_at - chrono::Utc::now()).num_seconds();
-    println!("Status: {}", if valid { "✓ Logged in" } else { "✗ Token expired" });
+    println!(
+        "Status: {}",
+        if valid {
+            "✓ Logged in"
+        } else {
+            "✗ Token expired"
+        }
+    );
     println!("Active server: {}", config.active);
     println!("Server URL: {}", session.base_url);
-    println!("Token expires in: {} seconds ({} minutes)", expires_in, expires_in / 60);
-    println!("Session created: {}", session.created_at.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "Token expires in: {} seconds ({} minutes)",
+        expires_in,
+        expires_in / 60
+    );
+    println!(
+        "Session created: {}",
+        session.created_at.format("%Y-%m-%d %H:%M:%S")
+    );
     if let Some(email) = &session.user_email {
         println!("User: {}", email);
     }

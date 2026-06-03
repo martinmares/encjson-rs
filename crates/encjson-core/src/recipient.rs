@@ -140,11 +140,12 @@ impl RecipientMetadata {
         }
 
         if let Some(recipient) = root.get("_recipient_key") {
-            let parsed: RecipientKeyV3 = serde_json::from_value(recipient.clone()).map_err(|e| {
-                Error::InvalidRecipientMetadata(format!(
-                    "invalid `_recipient_key` structure: {e}"
-                ))
-            })?;
+            let parsed: RecipientKeyV3 =
+                serde_json::from_value(recipient.clone()).map_err(|e| {
+                    Error::InvalidRecipientMetadata(format!(
+                        "invalid `_recipient_key` structure: {e}"
+                    ))
+                })?;
 
             if parsed.version != 3 {
                 return Err(Error::InvalidRecipientMetadata(
@@ -266,8 +267,8 @@ mod tests {
             version: 3,
             key_id: "ignored".to_string(),
             algorithm: "ml-kem-768+x25519".to_string(),
-            x25519_public_hex:
-                "4c016009ce7246bebb08ec6856e76839a5c690cf01b30357914020aac9eebc8b".to_string(),
+            x25519_public_hex: "4c016009ce7246bebb08ec6856e76839a5c690cf01b30357914020aac9eebc8b"
+                .to_string(),
             mlkem768_public_b64: "ZmFrZS1iYXNlNjQ=".to_string(),
         };
 

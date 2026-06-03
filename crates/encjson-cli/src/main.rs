@@ -1,20 +1,25 @@
 mod tui_edit;
 mod tui_register;
 
+use base64::Engine as _;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
-use base64::Engine as _;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
-use std::collections::BTreeMap;
 
-use encjson_core::crypto::{HybridSecureBox, SecureBox, generate_pair_consistent_key_pair, generate_v3_key_bundle};
+use crate::tui_edit::run_edit_ui;
+use encjson_core::crypto::{
+    HybridSecureBox, SecureBox, generate_pair_consistent_key_pair, generate_v3_key_bundle,
+};
 use encjson_core::error::Error;
-use encjson_core::json_utils::{TransformMode, dotenv_exports, env_exports, transform_json, transform_json_v3};
+use encjson_core::json_utils::{
+    TransformMode, dotenv_exports, env_exports, transform_json, transform_json_v3,
+};
 use encjson_core::key_sources::{
     CliKeyInput, ConjurConfig, KeySourceKind, KeySourceOptions, RemoteMtlsConfig, VaultConfig,
     derive_public_hex_from_private, load_from_cli, load_from_source, require_policy_context,
@@ -25,7 +30,6 @@ use encjson_core::key_store::{
 };
 use encjson_core::oidc_session;
 use encjson_core::recipient::{PrivateBundle, PublicBundle, RecipientMetadata};
-use crate::tui_edit::run_edit_ui;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -63,31 +67,63 @@ struct ResolveArgs {
     tenant: Option<String>,
 
     /// Policy environment
-    #[arg(long = "env", env = "ENCJSON_ENV", value_name = "ENV", help_heading = "Key Resolution")]
+    #[arg(
+        long = "env",
+        env = "ENCJSON_ENV",
+        value_name = "ENV",
+        help_heading = "Key Resolution"
+    )]
     env_name: Option<String>,
 
     /// Require tenant+env when policy-backed source is used
-    #[arg(long, env = "ENCJSON_SCOPE_REQUIRED", default_value_t = false, help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_SCOPE_REQUIRED",
+        default_value_t = false,
+        help_heading = "Key Resolution"
+    )]
     scope_required: bool,
 
     /// Allow legacy inconsistent key pairs
-    #[arg(long, env = "ENCJSON_LEGACY_MODE", default_value_t = true, help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_LEGACY_MODE",
+        default_value_t = true,
+        help_heading = "Key Resolution"
+    )]
     legacy_mode: bool,
 
     /// Resolve key material from provider instead of local store
-    #[arg(long, env = "ENCJSON_KEY_SOURCE", value_enum, help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_KEY_SOURCE",
+        value_enum,
+        help_heading = "Key Resolution"
+    )]
     key_source: Option<KeySourceCli>,
     /// Remote mTLS keys server URL
     #[arg(long, env = "ENCJSON_REMOTE_KEYS_URL", help_heading = "Key Resolution")]
     remote_keys_url: Option<String>,
     /// Client certificate for remote mTLS source
-    #[arg(long, env = "ENCJSON_REMOTE_TLS_CERT_FILE", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_REMOTE_TLS_CERT_FILE",
+        help_heading = "Key Resolution"
+    )]
     remote_tls_cert_file: Option<PathBuf>,
     /// Client private key for remote mTLS source
-    #[arg(long, env = "ENCJSON_REMOTE_TLS_KEY_FILE", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_REMOTE_TLS_KEY_FILE",
+        help_heading = "Key Resolution"
+    )]
     remote_tls_key_file: Option<PathBuf>,
     /// CA bundle for remote mTLS source
-    #[arg(long, env = "ENCJSON_REMOTE_TLS_CA_FILE", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_REMOTE_TLS_CA_FILE",
+        help_heading = "Key Resolution"
+    )]
     remote_tls_ca_file: Option<PathBuf>,
     /// HashiCorp Vault base URL
     #[arg(long, env = "ENCJSON_VAULT_ADDR", help_heading = "Key Resolution")]
@@ -99,31 +135,63 @@ struct ResolveArgs {
     #[arg(long, env = "ENCJSON_VAULT_TOKEN", help_heading = "Key Resolution")]
     vault_token: Option<String>,
     /// Vault field containing public key
-    #[arg(long, env = "ENCJSON_VAULT_PUBLIC_FIELD", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_VAULT_PUBLIC_FIELD",
+        help_heading = "Key Resolution"
+    )]
     vault_public_field: Option<String>,
     /// Vault field containing private key
-    #[arg(long, env = "ENCJSON_VAULT_PRIVATE_FIELD", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_VAULT_PRIVATE_FIELD",
+        help_heading = "Key Resolution"
+    )]
     vault_private_field: Option<String>,
     /// CyberArk Conjur appliance URL
-    #[arg(long, env = "ENCJSON_CONJUR_APPLIANCE_URL", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_CONJUR_APPLIANCE_URL",
+        help_heading = "Key Resolution"
+    )]
     conjur_appliance_url: Option<String>,
     /// Conjur account
     #[arg(long, env = "ENCJSON_CONJUR_ACCOUNT", help_heading = "Key Resolution")]
     conjur_account: Option<String>,
     /// Conjur authn login
-    #[arg(long, env = "ENCJSON_CONJUR_AUTHN_LOGIN", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_CONJUR_AUTHN_LOGIN",
+        help_heading = "Key Resolution"
+    )]
     conjur_authn_login: Option<String>,
     /// Conjur authn API key
-    #[arg(long, env = "ENCJSON_CONJUR_AUTHN_API_KEY", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_CONJUR_AUTHN_API_KEY",
+        help_heading = "Key Resolution"
+    )]
     conjur_authn_api_key: Option<String>,
     /// Conjur variable id containing public key
-    #[arg(long, env = "ENCJSON_CONJUR_PUBLIC_VARIABLE_ID", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_CONJUR_PUBLIC_VARIABLE_ID",
+        help_heading = "Key Resolution"
+    )]
     conjur_public_variable_id: Option<String>,
     /// Conjur variable id containing private key
-    #[arg(long, env = "ENCJSON_CONJUR_PRIVATE_VARIABLE_ID", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_CONJUR_PRIVATE_VARIABLE_ID",
+        help_heading = "Key Resolution"
+    )]
     conjur_private_variable_id: Option<String>,
     /// CA bundle for Conjur TLS
-    #[arg(long, env = "ENCJSON_CONJUR_CA_CERT_FILE", help_heading = "Key Resolution")]
+    #[arg(
+        long,
+        env = "ENCJSON_CONJUR_CA_CERT_FILE",
+        help_heading = "Key Resolution"
+    )]
     conjur_ca_cert_file: Option<PathBuf>,
 }
 
@@ -255,7 +323,12 @@ enum Commands {
         input: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -277,7 +350,12 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -308,7 +386,12 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
 
         /// Output format (json / shell / dot-env)
@@ -340,7 +423,12 @@ enum Commands {
         file: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
 
         /// Print expansion trace to stderr (use RUST_LOG=debug to see it)
@@ -387,7 +475,12 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -428,7 +521,12 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -481,7 +579,12 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -503,7 +606,12 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -530,7 +638,12 @@ enum Commands {
         recipient: Option<String>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -561,7 +674,12 @@ enum Commands {
         write: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -693,7 +811,12 @@ enum AssetsCommand {
         input: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -723,7 +846,12 @@ enum AssetsCommand {
         output: Option<PathBuf>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -749,7 +877,12 @@ enum AssetsCommand {
         overwrite: bool,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 
@@ -779,7 +912,12 @@ enum AssetsCommand {
         public_key: Option<String>,
 
         /// Optional key directory (overrides ENCJSON_KEYDIR, default is OS-specific via dirs)
-        #[arg(short = 'k', long, env = "ENCJSON_KEYDIR", help_heading = "Key Resolution")]
+        #[arg(
+            short = 'k',
+            long,
+            env = "ENCJSON_KEYDIR",
+            help_heading = "Key Resolution"
+        )]
         keydir: Option<PathBuf>,
     },
 }
@@ -1068,7 +1206,13 @@ fn run(command: Commands) -> Result<()> {
                 source_cfg: &source_cfg,
                 legacy_mode: resolve.legacy_mode,
             };
-            cmd_migrate_format(FileInput { file, input }, to, recipient.as_deref(), write, &ctx)
+            cmd_migrate_format(
+                FileInput { file, input },
+                to,
+                recipient.as_deref(),
+                write,
+                &ctx,
+            )
         }
         Commands::Register {
             public_hex,
@@ -1125,12 +1269,7 @@ fn run(command: Commands) -> Result<()> {
             port,
             server,
         } => run_async(oidc_session::handle_login(
-            "encjson",
-            &url,
-            &client,
-            port,
-            &server,
-            insecure,
+            "encjson", &url, &client, port, &server, insecure,
         )),
         Commands::Logout { server, all } => {
             if all {
@@ -1202,11 +1341,25 @@ fn handle_status() -> Result<()> {
     };
     let valid = oidc_session::is_session_valid(session);
     let expires_in = (session.expires_at - chrono::Utc::now()).num_seconds();
-    println!("Status: {}", if valid { "✓ Logged in" } else { "✗ Token expired" });
+    println!(
+        "Status: {}",
+        if valid {
+            "✓ Logged in"
+        } else {
+            "✗ Token expired"
+        }
+    );
     println!("Active server: {}", config.active);
     println!("Server URL: {}", session.base_url);
-    println!("Token expires in: {} seconds ({} minutes)", expires_in, expires_in / 60);
-    println!("Session created: {}", session.created_at.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "Token expires in: {} seconds ({} minutes)",
+        expires_in,
+        expires_in / 60
+    );
+    println!(
+        "Session created: {}",
+        session.created_at.format("%Y-%m-%d %H:%M:%S")
+    );
     if let Some(email) = &session.user_email {
         println!("User: {}", email);
     }
@@ -1347,39 +1500,38 @@ fn build_key_source_options(
         _ => None,
     };
 
-    let conjur = match kind {
-        KeySourceCli::Conjur => Some(ConjurConfig {
-            appliance_url: source_cfg
-                .conjur_appliance_url
-                .clone()
-                .ok_or_else(|| Error::Http("missing --conjur-appliance-url".to_string()))?,
-            account: source_cfg
-                .conjur_account
-                .clone()
-                .ok_or_else(|| Error::Http("missing --conjur-account".to_string()))?,
-            authn_login: source_cfg
-                .conjur_authn_login
-                .clone()
-                .ok_or_else(|| Error::Http("missing --conjur-authn-login".to_string()))?,
-            authn_api_key: source_cfg
-                .conjur_authn_api_key
-                .clone()
-                .ok_or_else(|| Error::Http("missing --conjur-authn-api-key".to_string()))?,
-            public_variable_id: source_cfg
-                .conjur_public_variable_id
-                .clone()
-                .ok_or_else(|| Error::Http("missing --conjur-public-variable-id".to_string()))?,
-            private_variable_id: source_cfg
-                .conjur_private_variable_id
-                .clone()
-                .ok_or_else(|| Error::Http("missing --conjur-private-variable-id".to_string()))?,
-            ca_cert_path: source_cfg
-                .conjur_ca_cert_file
-                .as_ref()
-                .map(|p| p.display().to_string()),
-        }),
-        _ => None,
-    };
+    let conjur =
+        match kind {
+            KeySourceCli::Conjur => Some(ConjurConfig {
+                appliance_url: source_cfg
+                    .conjur_appliance_url
+                    .clone()
+                    .ok_or_else(|| Error::Http("missing --conjur-appliance-url".to_string()))?,
+                account: source_cfg
+                    .conjur_account
+                    .clone()
+                    .ok_or_else(|| Error::Http("missing --conjur-account".to_string()))?,
+                authn_login: source_cfg
+                    .conjur_authn_login
+                    .clone()
+                    .ok_or_else(|| Error::Http("missing --conjur-authn-login".to_string()))?,
+                authn_api_key: source_cfg
+                    .conjur_authn_api_key
+                    .clone()
+                    .ok_or_else(|| Error::Http("missing --conjur-authn-api-key".to_string()))?,
+                public_variable_id: source_cfg.conjur_public_variable_id.clone().ok_or_else(
+                    || Error::Http("missing --conjur-public-variable-id".to_string()),
+                )?,
+                private_variable_id: source_cfg.conjur_private_variable_id.clone().ok_or_else(
+                    || Error::Http("missing --conjur-private-variable-id".to_string()),
+                )?,
+                ca_cert_path: source_cfg
+                    .conjur_ca_cert_file
+                    .as_ref()
+                    .map(|p| p.display().to_string()),
+            }),
+            _ => None,
+        };
 
     Ok(Some(KeySourceOptions {
         kind: kind.to_core_kind(),
@@ -1549,9 +1701,7 @@ fn cmd_register(cmd: RegisterCommand, ctx: &ResolveCtx<'_>) -> Result<()> {
             let loaded = load_from_cli(&CliKeyInput {
                 public_key: Some(public_hex.clone()),
                 private_key: ctx.private_key.map(ToString::to_string),
-                private_key_file: private_key_file
-                    .as_ref()
-                    .map(|p| p.display().to_string()),
+                private_key_file: private_key_file.as_ref().map(|p| p.display().to_string()),
                 private_key_fd,
                 private_key_stdin,
                 allow_insecure_cli_private_key,
@@ -1583,7 +1733,11 @@ fn cmd_register(cmd: RegisterCommand, ctx: &ResolveCtx<'_>) -> Result<()> {
     let existing: std::collections::HashSet<String> = remote_keys
         .into_iter()
         .map(|k| k.key_id.unwrap_or(k.public_hex))
-        .chain(pending.into_iter().map(|r| r.key_id.unwrap_or(r.public_hex)))
+        .chain(
+            pending
+                .into_iter()
+                .map(|r| r.key_id.unwrap_or(r.public_hex)),
+        )
         .collect();
 
     let mut new_keys: Vec<String> = local_keys
@@ -1598,14 +1752,8 @@ fn cmd_register(cmd: RegisterCommand, ctx: &ResolveCtx<'_>) -> Result<()> {
     }
 
     let tenants = fetch_remote_tenants(&keys_url, &token)?;
-    tui_register::run_register_tui(
-        new_keys,
-        tenants,
-        keys_url,
-        token,
-        ctx.keydir.clone(),
-    )
-    .map_err(|e| Error::Http(e.to_string()))?;
+    tui_register::run_register_tui(new_keys, tenants, keys_url, token, ctx.keydir.clone())
+        .map_err(|e| Error::Http(e.to_string()))?;
 
     Ok(())
 }
@@ -1618,15 +1766,15 @@ fn build_register_payload_from_local_key(
     ctx: &ResolveCtx<'_>,
 ) -> Result<RegisterPayload> {
     match load_stored_key_material(key_ref, ctx.keydir.as_deref())? {
-        StoredKeyMaterial::LegacyPrivateHex(private_hex) => Ok(RegisterPayload::Legacy(
-            RegisterPayloadLegacy {
+        StoredKeyMaterial::LegacyPrivateHex(private_hex) => {
+            Ok(RegisterPayload::Legacy(RegisterPayloadLegacy {
                 public_hex: key_ref.to_string(),
                 private_hex,
                 tenant,
                 note,
                 tags,
-            },
-        )),
+            }))
+        }
         StoredKeyMaterial::V3Bundle(bundle) => Ok(RegisterPayload::V3(RegisterPayloadV3 {
             key_id: bundle.key_id.clone(),
             version: bundle.version,
@@ -1708,9 +1856,7 @@ fn fetch_remote_keys(keys_url: &str, token: &str) -> Result<Vec<KeysKey>> {
         .send()
         .map_err(|e| Error::Http(e.to_string()))?;
     let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| Error::Http(e.to_string()))?;
+    let body = response.text().map_err(|e| Error::Http(e.to_string()))?;
     if !status.is_success() {
         return Err(Error::Http(body.trim().to_string()));
     }
@@ -1730,9 +1876,7 @@ fn fetch_remote_tenants(keys_url: &str, token: &str) -> Result<Vec<String>> {
         .send()
         .map_err(|e| Error::Http(e.to_string()))?;
     let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| Error::Http(e.to_string()))?;
+    let body = response.text().map_err(|e| Error::Http(e.to_string()))?;
     if !status.is_success() {
         return Err(Error::Http(body.trim().to_string()));
     }
@@ -1752,9 +1896,7 @@ fn fetch_pending_requests(keys_url: &str, token: &str) -> Result<Vec<KeysRequest
         .send()
         .map_err(|e| Error::Http(e.to_string()))?;
     let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| Error::Http(e.to_string()))?;
+    let body = response.text().map_err(|e| Error::Http(e.to_string()))?;
     if !status.is_success() {
         return Err(Error::Http(body.trim().to_string()));
     }
@@ -1770,9 +1912,7 @@ fn send_register_request(keys_url: &str, token: &str, payload: RegisterPayload) 
         .send()
         .map_err(|e| Error::Http(e.to_string()))?;
     let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| Error::Http(e.to_string()))?;
+    let body = response.text().map_err(|e| Error::Http(e.to_string()))?;
     if !status.is_success() {
         return Err(Error::Http(body.trim().to_string()));
     }
@@ -1791,9 +1931,7 @@ fn fetch_private_key(keys_url: &str, token: &str, public_hex: &str) -> Result<Ke
         .send()
         .map_err(|e| Error::Http(e.to_string()))?;
     let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| Error::Http(e.to_string()))?;
+    let body = response.text().map_err(|e| Error::Http(e.to_string()))?;
     if !status.is_success() {
         return Err(Error::Http(body.trim().to_string()));
     }
@@ -1812,9 +1950,7 @@ fn fetch_key_bundle(keys_url: &str, token: &str, key_id: &str) -> Result<KeysBun
         .send()
         .map_err(|e| Error::Http(e.to_string()))?;
     let status = response.status();
-    let body = response
-        .text()
-        .map_err(|e| Error::Http(e.to_string()))?;
+    let body = response.text().map_err(|e| Error::Http(e.to_string()))?;
     if !status.is_success() {
         return Err(Error::Http(body.trim().to_string()));
     }
@@ -1845,7 +1981,8 @@ fn cmd_sync(
                 remote_keys.retain(|item| item.public_hex == public_hex);
             }
             RecipientMetadata::RecipientKeyV3(recipient) => {
-                remote_keys.retain(|item| item.key_id.as_deref() == Some(recipient.key_id.as_str()));
+                remote_keys
+                    .retain(|item| item.key_id.as_deref() == Some(recipient.key_id.as_str()));
             }
         }
     }
@@ -1906,7 +2043,9 @@ fn cmd_sync(
                             .find(|c| c.algorithm == "x25519")
                             .map(|c| c.private.clone())
                             .ok_or_else(|| {
-                                Error::Http("v3 bundle missing x25519 private component".to_string())
+                                Error::Http(
+                                    "v3 bundle missing x25519 private component".to_string(),
+                                )
                             })?,
                     },
                     mlkem768: encjson_core::recipient::LocalMlKem768Keypair {
@@ -1917,7 +2056,9 @@ fn cmd_sync(
                             .find(|c| c.algorithm == "ml-kem-768")
                             .map(|c| c.public.clone())
                             .ok_or_else(|| {
-                                Error::Http("v3 bundle missing ml-kem-768 public component".to_string())
+                                Error::Http(
+                                    "v3 bundle missing ml-kem-768 public component".to_string(),
+                                )
                             })?,
                         private_b64: bundle
                             .private_bundle
@@ -1926,7 +2067,9 @@ fn cmd_sync(
                             .find(|c| c.algorithm == "ml-kem-768")
                             .map(|c| c.private.clone())
                             .ok_or_else(|| {
-                                Error::Http("v3 bundle missing ml-kem-768 private component".to_string())
+                                Error::Http(
+                                    "v3 bundle missing ml-kem-768 private component".to_string(),
+                                )
                             })?,
                     },
                 },
@@ -2027,7 +2170,6 @@ fn is_hex_key_name(name: &str) -> bool {
     name.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-
 fn cmd_init(keydir: Option<PathBuf>, api: EncJsonApiVersion, create_file: bool) -> Result<()> {
     if api == EncJsonApiVersion::V3_0 {
         let bundle = generate_v3_key_bundle()?;
@@ -2099,7 +2241,10 @@ fn cmd_encrypt(
         ResolvedJsonCrypto::None => {
             eprintln!("Warning: no recipient metadata found in JSON, nothing encrypted");
         }
-        ResolvedJsonCrypto::Legacy { sb, pair_mismatch: legacy_pair_mismatch } => {
+        ResolvedJsonCrypto::Legacy {
+            sb,
+            pair_mismatch: legacy_pair_mismatch,
+        } => {
             pair_mismatch = legacy_pair_mismatch;
             transform_json(&mut value, &sb, TransformMode::Encrypt)?;
         }
@@ -2190,9 +2335,7 @@ fn cmd_decrypt(
     }
 }
 
-fn cmd_assets(
-    command: AssetsCommand,
-) -> Result<()> {
+fn cmd_assets(command: AssetsCommand) -> Result<()> {
     match command {
         AssetsCommand::List {
             resolve,
@@ -2208,10 +2351,7 @@ fn cmd_assets(
                 source_cfg: &source_cfg,
                 legacy_mode: resolve.legacy_mode,
             };
-            let bundle = load_assets_bundle(
-                FileInput { file, input },
-                &ctx,
-            )?;
+            let bundle = load_assets_bundle(FileInput { file, input }, &ctx)?;
             for path in bundle.assets.keys() {
                 println!("{path}");
             }
@@ -2234,10 +2374,7 @@ fn cmd_assets(
                 source_cfg: &source_cfg,
                 legacy_mode: resolve.legacy_mode,
             };
-            let bundle = load_assets_bundle(
-                FileInput { file, input },
-                &ctx,
-            )?;
+            let bundle = load_assets_bundle(FileInput { file, input }, &ctx)?;
             let value = bundle.assets.get(&path).ok_or_else(|| {
                 Error::Http(format!("asset path '{}' not found in assets bundle", path))
             })?;
@@ -2268,10 +2405,7 @@ fn cmd_assets(
                 source_cfg: &source_cfg,
                 legacy_mode: resolve.legacy_mode,
             };
-            let bundle = load_assets_bundle(
-                FileInput { file, input },
-                &ctx,
-            )?;
+            let bundle = load_assets_bundle(FileInput { file, input }, &ctx)?;
             export_assets_bundle(&bundle, &out_dir, overwrite)
         }
         AssetsCommand::Import {
@@ -2297,13 +2431,7 @@ fn cmd_assets(
                 (false, false) => infer_asset_import_mode(&output)?,
                 (true, true) => unreachable!(),
             };
-            import_assets_bundle(
-                &from_dir,
-                &output,
-                mode,
-                public_key,
-                &ctx,
-            )
+            import_assets_bundle(&from_dir, &output, mode, public_key, &ctx)
         }
     }
 }
@@ -2359,7 +2487,10 @@ fn parse_assets_bundle(root: &Value) -> Result<BTreeMap<String, AssetEntry>> {
             }
         } else {
             serde_json::from_value::<AssetEntry>(value.clone()).map_err(|e| {
-                Error::Http(format!("asset '{}' must be stored as object {{content, kind}}: {e}", path))
+                Error::Http(format!(
+                    "asset '{}' must be stored as object {{content, kind}}: {e}",
+                    path
+                ))
             })?
         };
         out.insert(path.clone(), entry);
@@ -2373,9 +2504,14 @@ fn validate_asset_path(path: &str) -> Result<()> {
     }
     let p = Path::new(path);
     if p.is_absolute() {
-        return Err(Error::Http(format!("asset path '{}' must be relative", path)));
+        return Err(Error::Http(format!(
+            "asset path '{}' must be relative",
+            path
+        )));
     }
-    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(Error::Http(format!(
             "asset path '{}' must not contain '..'",
             path
@@ -2393,9 +2529,9 @@ fn decode_asset_base64(path: &str, value: &str) -> Result<Vec<u8>> {
 fn asset_kind_from_bytes(bytes: &[u8]) -> AssetKind {
     match std::str::from_utf8(bytes) {
         Ok(text) => {
-            let printable = text.chars().all(|ch| {
-                ch == '\n' || ch == '\r' || ch == '\t' || (!ch.is_control())
-            });
+            let printable = text
+                .chars()
+                .all(|ch| ch == '\n' || ch == '\r' || ch == '\t' || (!ch.is_control()));
             if printable {
                 AssetKind::Text
             } else {
@@ -2489,7 +2625,7 @@ fn import_assets_bundle(
                     return Err(Error::Http(
                         "--public-key is required when creating a new secured assets bundle"
                             .to_string(),
-                    ))
+                    ));
                 }
             }
         }
@@ -2612,7 +2748,10 @@ fn decrypt_json_with_sidecar(
     let mut pair_mismatch = false;
     match resolve_json_crypto(&value, ctx)? {
         ResolvedJsonCrypto::None => {}
-        ResolvedJsonCrypto::Legacy { sb, pair_mismatch: legacy_pair_mismatch } => {
+        ResolvedJsonCrypto::Legacy {
+            sb,
+            pair_mismatch: legacy_pair_mismatch,
+        } => {
             pair_mismatch = legacy_pair_mismatch;
             transform_json(&mut value, &sb, TransformMode::Decrypt)?;
         }
@@ -2774,7 +2913,10 @@ fn build_secret_manifests(
         let mut grouped: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
         for (env_key, secret_name, secret_key) in mappings_multi {
             let value = env_obj.get(env_key).ok_or_else(|| {
-                Error::Http(format!("missing env key '{}' for --from-env-secret mapping", env_key))
+                Error::Http(format!(
+                    "missing env key '{}' for --from-env-secret mapping",
+                    env_key
+                ))
             })?;
             let value = value.as_str().ok_or_else(|| {
                 Error::Http(format!(
@@ -2822,7 +2964,10 @@ fn build_secret_manifests(
     } else {
         for (env_key, secret_key) in mappings {
             let value = env_obj.get(env_key).ok_or_else(|| {
-                Error::Http(format!("missing env key '{}' for --from-env mapping", env_key))
+                Error::Http(format!(
+                    "missing env key '{}' for --from-env mapping",
+                    env_key
+                ))
             })?;
             let value = value.as_str().ok_or_else(|| {
                 Error::Http(format!(
@@ -3510,7 +3655,15 @@ mod tests {
 
     #[test]
     fn parse_assets_list_accepts_short_keydir() {
-        let cli = Cli::parse_from(["encjson", "assets", "list", "-k", "keys-dir", "-f", "assets.secured.json"]);
+        let cli = Cli::parse_from([
+            "encjson",
+            "assets",
+            "list",
+            "-k",
+            "keys-dir",
+            "-f",
+            "assets.secured.json",
+        ]);
         match cli.command {
             Some(Commands::Assets {
                 command: AssetsCommand::List { keydir, .. },
@@ -3537,7 +3690,13 @@ mod tests {
         ]);
         match cli.command {
             Some(Commands::Assets {
-                command: AssetsCommand::Get { path, base64, output, .. },
+                command:
+                    AssetsCommand::Get {
+                        path,
+                        base64,
+                        output,
+                        ..
+                    },
             }) => {
                 assert_eq!(path, "ssl/private-key.pem");
                 assert!(base64);
@@ -3563,12 +3722,13 @@ mod tests {
         ]);
         match cli.command {
             Some(Commands::Assets {
-                command: AssetsCommand::Import {
-                    secured,
-                    unsecured,
-                    public_key,
-                    ..
-                },
+                command:
+                    AssetsCommand::Import {
+                        secured,
+                        unsecured,
+                        public_key,
+                        ..
+                    },
             }) => {
                 assert!(secured);
                 assert!(!unsecured);
@@ -3595,7 +3755,12 @@ mod tests {
     #[test]
     fn parse_info_accepts_short_keydir() {
         let cli = Cli::parse_from([
-            "encjson", "info", "-k", "keys-dir", "-f", "env.secured.json",
+            "encjson",
+            "info",
+            "-k",
+            "keys-dir",
+            "-f",
+            "env.secured.json",
         ]);
         match cli.command {
             Some(Commands::Info { keydir, .. }) => {
@@ -3799,7 +3964,12 @@ mod tests {
             "-w",
         ]);
         match cli.command {
-            Some(Commands::MigrateFormat { recipient, to, write, .. }) => {
+            Some(Commands::MigrateFormat {
+                recipient,
+                to,
+                write,
+                ..
+            }) => {
                 assert_eq!(to, EncJsonApiVersion::V3_0);
                 assert!(write);
                 assert!(recipient.is_none());
@@ -3839,7 +4009,9 @@ mod tests {
             "-w",
         ]);
         match cli.command {
-            Some(Commands::RotateKey { recipient, write, .. }) => {
+            Some(Commands::RotateKey {
+                recipient, write, ..
+            }) => {
                 assert_eq!(recipient.as_deref(), Some("abc123"));
                 assert!(write);
             }
@@ -3931,11 +4103,7 @@ mod tests {
     fn cmd_set_updates_unsecured_environment() {
         let path = unique_path("set", ".json");
         let source_cfg = empty_source_cfg();
-        fs::write(
-            &path,
-            r#"{"environment":{"APP_A":"a","APP_B":"b"}}"#,
-        )
-        .unwrap();
+        fs::write(&path, r#"{"environment":{"APP_A":"a","APP_B":"b"}}"#).unwrap();
 
         cmd_set(
             FileInput {
@@ -4205,7 +4373,11 @@ mod tests {
         .unwrap();
 
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        let new_public = root.get("_public_key").and_then(Value::as_str).unwrap().to_string();
+        let new_public = root
+            .get("_public_key")
+            .and_then(Value::as_str)
+            .unwrap()
+            .to_string();
         let new_private = fs::read_to_string(dir.join(&new_public)).unwrap();
         let derived = derive_public_hex_from_private(new_private.trim()).unwrap();
         assert_eq!(derived, new_public);
@@ -4274,13 +4446,13 @@ mod tests {
 
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let new_recipient = root.get("_recipient_key").unwrap();
-        let new_key_id = new_recipient
-            .get("key_id")
-            .and_then(Value::as_str)
-            .unwrap();
+        let new_key_id = new_recipient.get("key_id").and_then(Value::as_str).unwrap();
         assert_ne!(new_key_id, old_key_id);
         assert!(dir.join(new_key_id).exists());
-        assert_eq!(root.as_object().unwrap().keys().next().map(String::as_str), Some("_recipient_key"));
+        assert_eq!(
+            root.as_object().unwrap().keys().next().map(String::as_str),
+            Some("_recipient_key")
+        );
 
         let (decrypted, pair_mismatch) = decrypt_json_with_sidecar(
             Some(&path),
@@ -4410,7 +4582,9 @@ mod tests {
 
         cmd_init(Some(key_dir.clone()), EncJsonApiVersion::V3_0, true).unwrap();
 
-        let root: Value = serde_json::from_str(&fs::read_to_string(work_dir.join("env.secured.json")).unwrap()).unwrap();
+        let root: Value =
+            serde_json::from_str(&fs::read_to_string(work_dir.join("env.secured.json")).unwrap())
+                .unwrap();
         let recipient = root.get("_recipient_key").unwrap();
         let key_id = recipient.get("key_id").and_then(Value::as_str).unwrap();
         assert!(key_dir.join(key_id).exists());
@@ -4562,7 +4736,8 @@ mod tests {
         let path = unique_path("migrate-v3-file", ".secured.json");
         let source_cfg = empty_source_cfg();
 
-        let (legacy_private, legacy_public) = encjson_core::crypto::generate_pair_consistent_key_pair();
+        let (legacy_private, legacy_public) =
+            encjson_core::crypto::generate_pair_consistent_key_pair();
         save_private_key(&legacy_public, &legacy_private, Some(&key_dir)).unwrap();
 
         fs::write(
@@ -4702,7 +4877,8 @@ mod tests {
         let path = unique_path("migrate-v3-auto-file", ".secured.json");
         let source_cfg = empty_source_cfg();
 
-        let (legacy_private, legacy_public) = encjson_core::crypto::generate_pair_consistent_key_pair();
+        let (legacy_private, legacy_public) =
+            encjson_core::crypto::generate_pair_consistent_key_pair();
         save_private_key(&legacy_public, &legacy_private, Some(&key_dir)).unwrap();
 
         fs::write(
@@ -4845,15 +5021,15 @@ mod tests {
             root.get("_public_key").and_then(Value::as_str),
             Some(public_hex.as_str())
         );
-            let stored = root
-                .get("assets")
-                .and_then(Value::as_object)
-                .unwrap()
-                .get("ssl/private-key.pem")
-                .and_then(Value::as_object)
-                .and_then(|v| v.get("content"))
-                .and_then(Value::as_str)
-                .unwrap();
+        let stored = root
+            .get("assets")
+            .and_then(Value::as_object)
+            .unwrap()
+            .get("ssl/private-key.pem")
+            .and_then(Value::as_object)
+            .and_then(|v| v.get("content"))
+            .and_then(Value::as_str)
+            .unwrap();
         assert!(stored.starts_with("EncJson[@api=2.0:@box="));
         assert_eq!(
             root.get("assets")
@@ -4866,7 +5042,11 @@ mod tests {
             Some("text")
         );
 
-        fs::write(src_dir.join("ssl").join("private-key.pem"), b"super-secret-2").unwrap();
+        fs::write(
+            src_dir.join("ssl").join("private-key.pem"),
+            b"super-secret-2",
+        )
+        .unwrap();
         import_assets_bundle(
             &src_dir,
             &out_file,
@@ -4934,9 +5114,7 @@ mod tests {
     #[test]
     fn infer_asset_import_mode_rejects_unknown_suffix() {
         let err = infer_asset_import_mode(Path::new("assets.json")).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("cannot infer asset bundle mode"));
+        assert!(err.to_string().contains("cannot infer asset bundle mode"));
     }
 
     #[test]
@@ -4953,9 +5131,7 @@ mod tests {
                 kind: Some(AssetKind::Text),
             },
         );
-        let bundle = AssetsBundle {
-            assets,
-        };
+        let bundle = AssetsBundle { assets };
 
         let err = export_assets_bundle(&bundle, &out_dir, false).unwrap_err();
         assert!(err.to_string().contains("already exists"));
@@ -4974,9 +5150,7 @@ mod tests {
                 kind: Some(AssetKind::Text),
             },
         );
-        let bundle = AssetsBundle {
-            assets,
-        };
+        let bundle = AssetsBundle { assets };
 
         export_assets_bundle(&bundle, &out_dir, false).unwrap();
 
@@ -5052,9 +5226,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("--public-key is required when creating a new secured assets bundle"));
+        assert!(
+            err.to_string()
+                .contains("--public-key is required when creating a new secured assets bundle")
+        );
 
         let _ = fs::remove_file(out_file);
         let _ = fs::remove_dir_all(src_dir);
@@ -5102,9 +5277,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("does not match existing _public_key"));
+        assert!(
+            err.to_string()
+                .contains("does not match existing _public_key")
+        );
 
         let _ = fs::remove_file(out_file);
         let _ = fs::remove_dir_all(src_dir);
@@ -5163,8 +5339,7 @@ mod tests {
                 normalize_line_endings: true,
             },
         );
-        let payload = base64::engine::general_purpose::STANDARD
-            .encode("line1\r\nline2\rline3");
+        let payload = base64::engine::general_purpose::STANDARD.encode("line1\r\nline2\rline3");
         let mut root = serde_json::json!({
             "environment": {
                 "MTLS_CERT": payload
@@ -5177,11 +5352,8 @@ mod tests {
 
     #[test]
     fn parse_from_env_mappings_parses_pairs() {
-        let out = parse_from_env_mappings(&[
-            "A=tls.crt".to_string(),
-            "B=tls.key".to_string(),
-        ])
-        .unwrap();
+        let out =
+            parse_from_env_mappings(&["A=tls.crt".to_string(), "B=tls.key".to_string()]).unwrap();
         assert_eq!(out[0], ("A".to_string(), "tls.crt".to_string()));
         assert_eq!(out[1], ("B".to_string(), "tls.key".to_string()));
     }
@@ -5230,34 +5402,22 @@ mod tests {
         assert_eq!(manifests[0].metadata.name, "sec-a");
         assert_eq!(manifests[1].metadata.name, "sec-b");
         assert_eq!(
-            manifests[0]
-                .data
-                .get("tls.crt")
-                .map(|s| s.as_str()),
+            manifests[0].data.get("tls.crt").map(|s| s.as_str()),
             Some("Y3J0")
         );
         assert_eq!(
-            manifests[0]
-                .data
-                .get("tls.key")
-                .map(|s| s.as_str()),
+            manifests[0].data.get("tls.key").map(|s| s.as_str()),
             Some("a2V5")
         );
         assert_eq!(
-            manifests[1]
-                .data
-                .get("ca.crt")
-                .map(|s| s.as_str()),
+            manifests[1].data.get("ca.crt").map(|s| s.as_str()),
             Some("Y2E=")
         );
     }
 
     #[test]
     fn build_secret_manifests_requires_secret_name_in_single_mode() {
-        let env_obj = serde_json::json!({"A": "x"})
-            .as_object()
-            .unwrap()
-            .clone();
+        let env_obj = serde_json::json!({"A": "x"}).as_object().unwrap().clone();
         let err = build_secret_manifests(
             &env_obj,
             None,
@@ -5272,10 +5432,7 @@ mod tests {
 
     #[test]
     fn build_secret_manifests_tls_requires_standard_keys() {
-        let env_obj = serde_json::json!({"A": "x"})
-            .as_object()
-            .unwrap()
-            .clone();
+        let env_obj = serde_json::json!({"A": "x"}).as_object().unwrap().clone();
         let err = build_secret_manifests(
             &env_obj,
             None,

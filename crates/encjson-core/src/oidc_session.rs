@@ -1,13 +1,13 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
+use openidconnect::TokenResponse as OidcTokenResponseTrait;
+use openidconnect::reqwest as oidc_reqwest;
 use openidconnect::{
-    core::{CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreProviderMetadata},
     AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce, OAuth2TokenResponse,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope,
+    core::{CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreProviderMetadata},
 };
-use base64::Engine as _;
-use openidconnect::reqwest as oidc_reqwest;
-use openidconnect::TokenResponse as OidcTokenResponseTrait;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -108,11 +108,9 @@ pub fn is_session_valid(session: &Session) -> bool {
 pub async fn ensure_valid_session(app_name: &str) -> Result<(Session, String)> {
     let config = load_sessions(app_name)?;
     let server_name = config.active.clone();
-    let mut session = config
-        .servers
-        .get(&server_name)
-        .cloned()
-        .ok_or_else(|| anyhow!("Not logged in. Run '{app_name} login --url <SERVER_URL>' first."))?;
+    let mut session = config.servers.get(&server_name).cloned().ok_or_else(|| {
+        anyhow!("Not logged in. Run '{app_name} login --url <SERVER_URL>' first.")
+    })?;
 
     if !is_session_valid(&session) || (session.expires_at - Utc::now()).num_seconds() < 300 {
         session = refresh_session_async(session).await?;
@@ -150,9 +148,8 @@ pub async fn handle_login(
     .set_redirect_uri(redirect_url);
 
     let (code_verifier, _code_challenge) = generate_pkce_pair();
-    let pkce_challenge = PkceCodeChallenge::from_code_verifier_sha256(
-        &PkceCodeVerifier::new(code_verifier.clone()),
-    );
+    let pkce_challenge =
+        PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(code_verifier.clone()));
 
     let (auth_url, csrf_state, nonce) = client
         .authorize_url(
@@ -202,10 +199,9 @@ pub async fn handle_login(
         eprintln!("Could not open browser: {}", e);
     }
 
-    let (code, returned_state) =
-        tokio::time::timeout(std::time::Duration::from_secs(120), rx)
-            .await
-            .context("Login timeout after 2 minutes")??;
+    let (code, returned_state) = tokio::time::timeout(std::time::Duration::from_secs(120), rx)
+        .await
+        .context("Login timeout after 2 minutes")??;
 
     if returned_state != *csrf_state.secret() {
         bail!("State mismatch in OAuth2 callback");
@@ -221,15 +217,19 @@ pub async fn handle_login(
         .await
         .context("Failed to exchange authorization code for tokens")?;
 
-    let id_token = token_response.id_token().context("No ID token in response")?;
+    let id_token = token_response
+        .id_token()
+        .context("No ID token in response")?;
 
     let claims = id_token
-        .claims(&client.id_token_verifier(), move |nonce_opt: Option<&Nonce>| match nonce_opt
-        {
-            Some(value) if value.secret() == nonce.secret() => Ok(()),
-            Some(_) => Err("Nonce mismatch".to_string()),
-            None => Err("No nonce in token".to_string()),
-        })
+        .claims(
+            &client.id_token_verifier(),
+            move |nonce_opt: Option<&Nonce>| match nonce_opt {
+                Some(value) if value.secret() == nonce.secret() => Ok(()),
+                Some(_) => Err("Nonce mismatch".to_string()),
+                None => Err("No nonce in token".to_string()),
+            },
+        )
         .context("Failed to verify ID token")?;
 
     let email = claims
@@ -271,7 +271,10 @@ pub async fn handle_login(
     save_session(app_name, server_name, session)?;
 
     println!("✓ Login successful!");
-    println!("Session saved to {}", sessions_file_path(app_name)?.display());
+    println!(
+        "Session saved to {}",
+        sessions_file_path(app_name)?.display()
+    );
     println!("Server: {}", server_name);
 
     Ok(())
@@ -284,14 +287,16 @@ async fn discover_provider(
 ) -> Result<CoreProviderMetadata> {
     let issuer_url = IssuerUrl::new(base_url.to_string()).context("Invalid issuer URL")?;
     if insecure {
-        eprintln!("Warning: --insecure is not supported for OIDC discovery; proceeding with default TLS validation.");
+        eprintln!(
+            "Warning: --insecure is not supported for OIDC discovery; proceeding with default TLS validation."
+        );
     }
     let metadata = CoreProviderMetadata::discover_async(issuer_url, http_client).await?;
     Ok(metadata)
 }
 
 fn generate_pkce_pair() -> (String, String) {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use sha2::{Digest, Sha256};
 
     let code_verifier: String = rand::rng()
@@ -388,8 +393,8 @@ fn parse_raw_claims(id_token: &CoreIdToken) -> Result<HashMap<String, Value>> {
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(parts[1])
         .context("Failed to decode JWT payload")?;
-    let claims: HashMap<String, Value> = serde_json::from_slice(&payload)
-        .context("Failed to parse JWT claims")?;
+    let claims: HashMap<String, Value> =
+        serde_json::from_slice(&payload).context("Failed to parse JWT claims")?;
     Ok(claims)
 }
 

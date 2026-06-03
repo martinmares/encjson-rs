@@ -64,13 +64,15 @@ pub fn load_private_key(
     private_key_override: Option<&str>,
 ) -> Result<String, Error> {
     if let Some(pk) = private_key_override
-        && !pk.trim().is_empty() {
-            return Ok(pk.trim().to_owned());
-        }
+        && !pk.trim().is_empty()
+    {
+        return Ok(pk.trim().to_owned());
+    }
     if let Ok(pk) = env::var("ENCJSON_PRIVATE_KEY")
-        && !pk.trim().is_empty() {
-            return Ok(pk.trim().to_owned());
-        }
+        && !pk.trim().is_empty()
+    {
+        return Ok(pk.trim().to_owned());
+    }
 
     if let Some(remote_key) = fetch_remote_private_key(public_hex) {
         return Ok(remote_key);
@@ -90,8 +92,7 @@ pub fn load_private_key(
 }
 
 fn fetch_remote_private_key(public_hex: &str) -> Option<String> {
-    let url = env::var("ENCJSON_KEYS_URL")
-        .ok()?;
+    let url = env::var("ENCJSON_KEYS_URL").ok()?;
     let token = env::var("ENCJSON_ACCESS_TOKEN").ok()?;
     if url.trim().is_empty() || token.trim().is_empty() {
         return None;
@@ -101,11 +102,7 @@ fn fetch_remote_private_key(public_hex: &str) -> Option<String> {
         url.trim_end_matches('/'),
         public_hex
     );
-    let resp = Client::new()
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .ok()?;
+    let resp = Client::new().get(url).bearer_auth(token).send().ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -160,9 +157,9 @@ pub fn load_stored_key_material(
 
 pub fn load_v3_key_bundle(key_id: &str, key_dir: Option<&Path>) -> Result<LocalKeyFileV3, Error> {
     match load_stored_key_material(key_id, key_dir)? {
-        StoredKeyMaterial::LegacyPrivateHex(_) => Err(Error::InvalidRecipientMetadata(
-            format!("stored key `{key_id}` is a legacy private hex, not a v3 bundle"),
-        )),
+        StoredKeyMaterial::LegacyPrivateHex(_) => Err(Error::InvalidRecipientMetadata(format!(
+            "stored key `{key_id}` is a legacy private hex, not a v3 bundle"
+        ))),
         StoredKeyMaterial::V3Bundle(bundle) => Ok(bundle),
     }
 }

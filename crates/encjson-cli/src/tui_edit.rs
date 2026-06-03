@@ -271,8 +271,8 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
             app.input.clear();
             app.cursor = 0;
             app.mode = Mode::AddKey;
-            app.add_insert_above =
-                key.modifiers.contains(KeyModifiers::SHIFT) || matches!(key.code, KeyCode::Char('A'));
+            app.add_insert_above = key.modifiers.contains(KeyModifiers::SHIFT)
+                || matches!(key.code, KeyCode::Char('A'));
         }
         KeyCode::Char('t') => {
             sort_entries(app);
@@ -437,27 +437,28 @@ fn handle_rename_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
         KeyCode::Enter => {
             let trimmed = app.input.trim();
             if !trimmed.is_empty()
-                && let Some(index) = app.pending_rename.take() {
-                    let candidate = trimmed.to_uppercase();
-                    if !is_valid_env_key(&candidate) {
-                        app.pending_rename = Some(index);
-                        return None;
-                    }
-                    let same_key = app.entries[index].key == candidate;
-                    let exists = app.entries.iter().any(|e| e.key == candidate);
-                    if exists && !same_key {
-                        app.pending_rename = Some(index);
-                        return None;
-                    }
-                    if !same_key && index < app.entries.len() {
-                        let old_key = app.entries[index].key.clone();
-                        app.entries[index].key = candidate;
-                        app.entries[index].dirty = true;
-                        app.deleted_keys.push(old_key);
-                        app.filter = None;
-                        app.selected = 0;
-                    }
+                && let Some(index) = app.pending_rename.take()
+            {
+                let candidate = trimmed.to_uppercase();
+                if !is_valid_env_key(&candidate) {
+                    app.pending_rename = Some(index);
+                    return None;
                 }
+                let same_key = app.entries[index].key == candidate;
+                let exists = app.entries.iter().any(|e| e.key == candidate);
+                if exists && !same_key {
+                    app.pending_rename = Some(index);
+                    return None;
+                }
+                if !same_key && index < app.entries.len() {
+                    let old_key = app.entries[index].key.clone();
+                    app.entries[index].key = candidate;
+                    app.entries[index].dirty = true;
+                    app.deleted_keys.push(old_key);
+                    app.filter = None;
+                    app.selected = 0;
+                }
+            }
             app.mode = Mode::Normal;
         }
         KeyCode::Esc => {
@@ -836,7 +837,12 @@ fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
     let height = height.min(r.height);
     let x = r.x + (r.width.saturating_sub(width)) / 2;
     let y = r.y + (r.height.saturating_sub(height)) / 2;
-    Rect { x, y, width, height }
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }
 
 fn parse_json_or_string(input: &str) -> Value {
@@ -1268,7 +1274,8 @@ fn apply_save(app: &mut App, ctx: &mut SaveContext<'_>) -> Result<(), Error> {
     app.original.clear();
     for entry in &mut app.entries {
         entry.dirty = false;
-        app.original.insert(entry.key.clone(), entry.display.clone());
+        app.original
+            .insert(entry.key.clone(), entry.display.clone());
     }
     app.deleted_keys.clear();
     app.order_changed = false;

@@ -5,17 +5,21 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap};
-use ratatui::Terminal;
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
+};
 use serde::Deserialize;
 use serde_json::Value;
-use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
+use tui_input::backend::crossterm::EventHandler;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Mode {
@@ -169,10 +173,7 @@ impl App {
                 .collect();
         }
         if status_choices.is_empty() {
-            status_choices = vec![
-                "active".to_string(),
-                "revoked".to_string(),
-            ];
+            status_choices = vec!["active".to_string(), "revoked".to_string()];
         }
         if tenants.is_empty() {
             tenants = tenant_choices.clone();
@@ -206,7 +207,10 @@ impl App {
     }
 
     fn with_remote(mut self, base_url: String, access_token: String) -> Self {
-        self.remote = Some(RemoteConfig { base_url, access_token });
+        self.remote = Some(RemoteConfig {
+            base_url,
+            access_token,
+        });
         self
     }
 }
@@ -232,10 +236,7 @@ where
 }
 
 fn choice_index(choices: &[String], value: &str) -> usize {
-    choices
-        .iter()
-        .position(|item| item == value)
-        .unwrap_or(0)
+    choices.iter().position(|item| item == value).unwrap_or(0)
 }
 
 pub fn run_ctl_ui_with_remote(
@@ -288,10 +289,11 @@ fn run_app_with(
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-                    && handle_key(app, key)? {
-                        return Ok(());
-                    }
+            && key.kind == KeyEventKind::Press
+            && handle_key(app, key)?
+        {
+            return Ok(());
+        }
 
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
@@ -350,12 +352,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                     return Ok(false);
                 }
                 if let Some(remote) = &app.remote
-                    && let Some(item) = selected_item(app) {
-                        match fetch_remote_key(remote, &item.public_hex) {
-                            Ok(updated) => update_item(app, updated),
-                            Err(err) => set_status_error(app, format!("detail fetch failed: {err}")),
-                        }
+                    && let Some(item) = selected_item(app)
+                {
+                    match fetch_remote_key(remote, &item.public_hex) {
+                        Ok(updated) => update_item(app, updated),
+                        Err(err) => set_status_error(app, format!("detail fetch failed: {err}")),
                     }
+                }
                 if let Some(item) = selected_item(app) {
                     app.draft = Some(KeyDraft {
                         tenant: item.tenant.clone(),
@@ -373,12 +376,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
                     return Ok(false);
                 }
                 if let Some(remote) = &app.remote
-                    && let Some(item) = selected_item(app) {
-                        match fetch_remote_key(remote, &item.public_hex) {
-                            Ok(updated) => update_item(app, updated),
-                            Err(err) => set_status_error(app, format!("detail fetch failed: {err}")),
-                        }
+                    && let Some(item) = selected_item(app)
+                {
+                    match fetch_remote_key(remote, &item.public_hex) {
+                        Ok(updated) => update_item(app, updated),
+                        Err(err) => set_status_error(app, format!("detail fetch failed: {err}")),
                     }
+                }
                 if let Some(item) = selected_item(app) {
                     app.draft = Some(KeyDraft {
                         tenant: item.tenant.clone(),
@@ -602,9 +606,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
             }
             KeyCode::Enter => {
                 if let Some(draft) = app.draft.as_mut()
-                    && let Some(value) = app.tenant_choices.get(app.edit_field) {
-                        draft.tenant = value.clone();
-                    }
+                    && let Some(value) = app.tenant_choices.get(app.edit_field)
+                {
+                    draft.tenant = value.clone();
+                }
                 app.edit_field = 0;
                 app.mode = Mode::Edit;
             }
@@ -627,9 +632,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
             }
             KeyCode::Enter => {
                 if let Some(draft) = app.draft.as_mut()
-                    && let Some(value) = app.status_choices.get(app.edit_field) {
-                        draft.status = value.clone();
-                    }
+                    && let Some(value) = app.status_choices.get(app.edit_field)
+                {
+                    draft.status = value.clone();
+                }
                 app.edit_field = 1;
                 app.mode = Mode::Edit;
             }
@@ -726,9 +732,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool, Box<dyn Error>> {
             }
             KeyCode::Enter => {
                 if let Some(draft) = app.request_draft.as_mut()
-                    && let Some(value) = app.tenant_choices.get(app.edit_field) {
-                        draft.tenant = value.clone();
-                    }
+                    && let Some(value) = app.tenant_choices.get(app.edit_field)
+                {
+                    draft.tenant = value.clone();
+                }
                 app.edit_field = 0;
                 app.mode = Mode::RequestEdit;
             }
@@ -847,7 +854,11 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
 
     let header = Paragraph::new(render_tabs(app))
         .alignment(Alignment::Left)
-        .block(Block::default().borders(Borders::ALL).title("encjson-keys-ctl"));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("encjson-keys-ctl"),
+        );
     f.render_widget(header, chunks[0]);
 
     let main_chunks = Layout::default()
@@ -1021,9 +1032,10 @@ fn render_text_input(
 
 fn current_status(app: &App) -> (String, bool) {
     if let Some(temp) = app.status_temp.as_ref()
-        && Instant::now() < temp.expires_at {
-            return (temp.message.clone(), temp.is_error);
-        }
+        && Instant::now() < temp.expires_at
+    {
+        return (temp.message.clone(), temp.is_error);
+    }
     (app.status_base.clone(), false)
 }
 
@@ -1102,11 +1114,7 @@ fn tab_span(label: &str, active: bool, warn: bool) -> Span<'static> {
     Span::styled(format!(" {label} "), style)
 }
 
-fn render_main_view(
-    f: &mut ratatui::Frame<'_>,
-    app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
+fn render_main_view(f: &mut ratatui::Frame<'_>, app: &App, chunks: Vec<ratatui::layout::Rect>) {
     match app.view {
         View::Keys => render_keys_view(f, app, chunks),
         View::Tenants => {
@@ -1148,11 +1156,7 @@ struct SimpleListView<'a> {
     selected: usize,
 }
 
-fn render_keys_view(
-    f: &mut ratatui::Frame<'_>,
-    app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
+fn render_keys_view(f: &mut ratatui::Frame<'_>, app: &App, chunks: Vec<ratatui::layout::Rect>) {
     let indices = filtered_keys_indices(app);
     let list_items: Vec<ListItem> = if indices.is_empty() {
         vec![ListItem::new(Line::from(" no items"))]
@@ -1169,9 +1173,7 @@ fn render_keys_view(
         let offset = list_offset(selected, list_height);
         state = state.with_selected(Some(selected)).with_offset(offset);
     }
-    let list_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Keys");
+    let list_block = Block::default().borders(Borders::ALL).title("Keys");
     let list = List::new(list_items)
         .block(list_block)
         .highlight_symbol(">> ")
@@ -1188,11 +1190,7 @@ fn render_keys_view(
     f.render_widget(details, chunks[1]);
 }
 
-fn render_requests_view(
-    f: &mut ratatui::Frame<'_>,
-    app: &App,
-    chunks: Vec<ratatui::layout::Rect>,
-) {
+fn render_requests_view(f: &mut ratatui::Frame<'_>, app: &App, chunks: Vec<ratatui::layout::Rect>) {
     let indices = filtered_requests_indices(app);
     let list_items: Vec<ListItem> = if indices.is_empty() {
         vec![ListItem::new(Line::from(" no requests"))]
@@ -1209,9 +1207,7 @@ fn render_requests_view(
         let offset = list_offset(selected, list_height);
         state = state.with_selected(Some(selected)).with_offset(offset);
     }
-    let list_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Requests");
+    let list_block = Block::default().borders(Borders::ALL).title("Requests");
     let list = List::new(list_items)
         .block(list_block)
         .highlight_symbol(">> ")
@@ -1249,9 +1245,7 @@ fn render_simple_list(
         let offset = list_offset(selected, list_height);
         state = state.with_selected(Some(selected)).with_offset(offset);
     }
-    let list_block = Block::default()
-        .borders(Borders::ALL)
-        .title(view.title);
+    let list_block = Block::default().borders(Borders::ALL).title(view.title);
     let list = List::new(list_items)
         .block(list_block)
         .highlight_symbol(">> ")
@@ -1485,7 +1479,10 @@ fn truncate(value: &str, max: usize) -> String {
     if value.len() <= max {
         return value.to_string();
     }
-    let mut out = value.chars().take(max.saturating_sub(3)).collect::<String>();
+    let mut out = value
+        .chars()
+        .take(max.saturating_sub(3))
+        .collect::<String>();
     out.push_str("...");
     out
 }
@@ -1525,7 +1522,11 @@ fn build_details(app: &App) -> Vec<Line<'static>> {
                 ),
                 detail_line(
                     "note",
-                    if item.note.trim().is_empty() { "-" } else { &item.note },
+                    if item.note.trim().is_empty() {
+                        "-"
+                    } else {
+                        &item.note
+                    },
                 ),
             ];
             if let Some(key_id) = item.key_id.as_deref() {
@@ -1579,12 +1580,13 @@ fn build_details(app: &App) -> Vec<Line<'static>> {
                 ),
                 detail_line(
                     "note",
-                    if item.note.trim().is_empty() { "-" } else { &item.note },
+                    if item.note.trim().is_empty() {
+                        "-"
+                    } else {
+                        &item.note
+                    },
                 ),
-                detail_line(
-                    "requested_by",
-                    item.requested_by.as_deref().unwrap_or("-"),
-                ),
+                detail_line("requested_by", item.requested_by.as_deref().unwrap_or("-")),
                 detail_line("requested_at", &item.requested_at),
             ];
             if let Some(key_id) = item.key_id.as_deref() {
@@ -1755,11 +1757,7 @@ fn apply_request_draft(app: &mut App) -> Result<bool, Box<dyn Error>> {
         remote_update_request(remote, draft)?;
         app.requests = fetch_remote_requests(&remote.base_url, &remote.access_token)?;
         app.items = fetch_remote_keys(&remote.base_url, &remote.access_token)?;
-    } else if let Some(item) = app
-        .requests
-        .iter_mut()
-        .find(|item| item.id == draft.id)
-    {
+    } else if let Some(item) = app.requests.iter_mut().find(|item| item.id == draft.id) {
         item.tenant = draft.tenant.clone();
         item.note = draft.note.clone();
         item.tags = draft.tags.clone();
@@ -1790,7 +1788,11 @@ fn apply_draft(app: &mut App) -> Result<bool, Box<dyn Error>> {
 }
 
 fn update_item(app: &mut App, updated: KeyItem) {
-    if let Some(pos) = app.items.iter().position(|item| item.public_hex == updated.public_hex) {
+    if let Some(pos) = app
+        .items
+        .iter()
+        .position(|item| item.public_hex == updated.public_hex)
+    {
         app.items[pos] = updated;
     }
 }
@@ -1814,7 +1816,11 @@ fn active_total(app: &App) -> usize {
 }
 
 fn remote_url(base_url: &str, path: &str) -> String {
-    format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 fn fetch_remote_keys(base_url: &str, access_token: &str) -> Result<Vec<KeyItem>, Box<dyn Error>> {
@@ -1833,10 +1839,7 @@ fn fetch_remote_keys(base_url: &str, access_token: &str) -> Result<Vec<KeyItem>,
 fn fetch_remote_key(remote: &RemoteConfig, public_hex: &str) -> Result<KeyItem, Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
     let url = remote_url(&remote.base_url, &format!("/api/v1/keys/{}", public_hex));
-    let response = client
-        .get(url)
-        .bearer_auth(&remote.access_token)
-        .send()?;
+    let response = client.get(url).bearer_auth(&remote.access_token).send()?;
     let status = response.status();
     let body = response.text()?;
     if !status.is_success() {
@@ -1846,10 +1849,7 @@ fn fetch_remote_key(remote: &RemoteConfig, public_hex: &str) -> Result<KeyItem, 
     Ok(item)
 }
 
-fn fetch_remote_tenants(
-    base_url: &str,
-    access_token: &str,
-) -> Result<Vec<String>, Box<dyn Error>> {
+fn fetch_remote_tenants(base_url: &str, access_token: &str) -> Result<Vec<String>, Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
     let url = remote_url(base_url, "/api/v1/tenants");
     let response = client.get(url).bearer_auth(access_token).send()?;
@@ -1861,7 +1861,12 @@ fn fetch_remote_tenants(
     let tenants: Vec<Value> = serde_json::from_str(&body)?;
     let names = tenants
         .into_iter()
-        .filter_map(|value| value.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .filter_map(|value| {
+            value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     Ok(names)
 }
@@ -1990,7 +1995,10 @@ fn remote_approve_request(
     tags: &[String],
 ) -> Result<(), Box<dyn Error>> {
     let client = reqwest::blocking::Client::new();
-    let url = remote_url(&remote.base_url, &format!("/api/v1/requests/{}/approve", id));
+    let url = remote_url(
+        &remote.base_url,
+        &format!("/api/v1/requests/{}/approve", id),
+    );
     let body = serde_json::json!({
         "tenant": tenant,
         "status": "active",
@@ -2213,7 +2221,9 @@ fn render_request_edit_dialog(f: &mut ratatui::Frame<'_>, app: &App) {
 fn form_line(label: &str, value: &str, active: bool) -> Line<'static> {
     let prefix = if active { "> " } else { "  " };
     let style = if active {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::White)
     };
@@ -2284,7 +2294,11 @@ fn render_confirm_dialog(f: &mut ratatui::Frame<'_>, title: &str, message: &str)
     f.render_widget(paragraph, area);
 }
 
-fn centered_rect(percent_x: u16, height: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+fn centered_rect(
+    percent_x: u16,
+    height: u16,
+    area: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -2328,7 +2342,11 @@ fn centered_rect_percent(
     horizontal[1]
 }
 
-fn centered_rect_fixed(width: u16, height: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+fn centered_rect_fixed(
+    width: u16,
+    height: u16,
+    area: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

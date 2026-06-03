@@ -1,50 +1,52 @@
 use std::net::SocketAddr;
 use std::{io::BufReader, sync::Arc as StdArc};
 
-use axum::{
-    Router,
-    extract::{Path, Query, State, Form},
-    http::{HeaderMap, StatusCode, Request},
-    response::{IntoResponse, Response, Redirect},
-    routing::{get, patch, post},
-    Json,
+use aes_gcm::aead::generic_array::GenericArray;
+use aes_gcm::{
+    AeadCore, Aes256Gcm, KeyInit,
+    aead::{Aead, OsRng},
 };
-use clap::Parser;
+use axum::{
+    Json, Router,
+    extract::{Form, Path, Query, State},
+    http::{HeaderMap, Request, StatusCode},
+    response::{IntoResponse, Redirect, Response},
+    routing::{get, patch, post},
+};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
+use clap::Parser;
 use encjson_core::key_sources::{
     ConjurConfig, KeySourceKind, KeySourceOptions, RemoteMtlsConfig, VaultConfig, load_from_source,
     require_policy_context,
 };
-use encjson_core::recipient::{PrivateBundle, PublicBundle, compute_key_id};
-use jsonwebtoken::{decode, decode_header, jwk::JwkSet, DecodingKey, Validation};
-use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, QueryBuilder};
-use tracing::{error, info};
-use x25519_dalek::{PublicKey, StaticSecret};
-use aes_gcm::{Aes256Gcm, KeyInit, aead::{Aead, OsRng}, AeadCore};
-use aes_gcm::aead::generic_array::GenericArray;
-use base64::Engine;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
-use sha2::Digest;
-use rand::Rng;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use urlencoding::encode;
-use std::fmt::Write as _;
-use hyper::service::service_fn;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use rustls::RootCertStore;
-use rustls::server::WebPkiClientVerifier;
-use tokio_rustls::TlsAcceptor;
-use tower_service::Service;
-use x509_parser::extensions::GeneralName;
-use x509_parser::prelude::ParsedExtension;
-use simple_policy_engine::{
+use encjson_core::policy_engine::{
     Decision, EngineInput, Policy, Profile, ResourceInput, ResourceScopedInput, evaluate,
     validate_for_profile,
 };
+use encjson_core::recipient::{PrivateBundle, PublicBundle, compute_key_id};
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use jsonwebtoken::{DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
+use rand::Rng;
+use rustls::RootCertStore;
+use rustls::server::WebPkiClientVerifier;
+use serde::{Deserialize, Serialize};
+use sha2::Digest;
+use sqlx::{PgPool, Postgres, QueryBuilder};
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
+use tokio_rustls::TlsAcceptor;
+use tower_service::Service;
+use tracing::{error, info};
+use urlencoding::encode;
+use x509_parser::extensions::GeneralName;
+use x509_parser::prelude::ParsedExtension;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 #[derive(Debug, Parser)]
 #[command(name = "encjson-keys-server", about = "Keys server for encjson")]
@@ -89,7 +91,11 @@ struct Args {
     keys_tls_key_file: Option<String>,
     #[arg(long, env = "ENCJSON_KEYS_TLS_CLIENT_CA_FILE")]
     keys_tls_client_ca_file: Option<String>,
-    #[arg(long, env = "ENCJSON_KEYS_SERVER_SCOPE_REQUIRED", default_value_t = false)]
+    #[arg(
+        long,
+        env = "ENCJSON_KEYS_SERVER_SCOPE_REQUIRED",
+        default_value_t = false
+    )]
     keys_server_scope_required: bool,
     #[arg(long, env = "ENCJSON_TENANT")]
     tenant: Option<String>,
@@ -129,11 +135,19 @@ struct Args {
     conjur_private_variable_id: Option<String>,
     #[arg(long, env = "ENCJSON_CONJUR_CA_CERT_FILE")]
     conjur_ca_cert_file: Option<String>,
-    #[arg(long, env = "ENCJSON_KEYS_BOOTSTRAP_FROM_SOURCE", default_value_t = false)]
+    #[arg(
+        long,
+        env = "ENCJSON_KEYS_BOOTSTRAP_FROM_SOURCE",
+        default_value_t = false
+    )]
     keys_bootstrap_from_source: bool,
     #[arg(long, env = "ENCJSON_KEYS_BOOTSTRAP_STATUS", default_value = STATUS_ACTIVE)]
     keys_bootstrap_status: String,
-    #[arg(long, env = "ENCJSON_KEYS_BOOTSTRAP_NOTE", default_value = "bootstrap-from-source")]
+    #[arg(
+        long,
+        env = "ENCJSON_KEYS_BOOTSTRAP_NOTE",
+        default_value = "bootstrap-from-source"
+    )]
     keys_bootstrap_note: String,
 }
 
@@ -527,7 +541,11 @@ fn tabs(active: &str) -> String {
     let mut out = String::new();
     out.push_str(r#"<ul class="nav nav-tabs">"#);
     for (id, label, href) in items {
-        let cls = if id == active { "nav-link active" } else { "nav-link" };
+        let cls = if id == active {
+            "nav-link active"
+        } else {
+            "nav-link"
+        };
         let _ = write!(
             out,
             r#"<li class="nav-item"><a class="{}" href="{}">{}</a></li>"#,
@@ -650,36 +668,35 @@ fn build_key_source_options(args: &Args) -> anyhow::Result<Option<KeySourceOptio
         _ => None,
     };
 
-    let conjur = match kind {
-        KeySourceCli::Conjur => Some(ConjurConfig {
-            appliance_url: args
-                .conjur_appliance_url
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_APPLIANCE_URL is required"))?,
-            account: args
-                .conjur_account
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_ACCOUNT is required"))?,
-            authn_login: args
-                .conjur_authn_login
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_AUTHN_LOGIN is required"))?,
-            authn_api_key: args
-                .conjur_authn_api_key
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_AUTHN_API_KEY is required"))?,
-            public_variable_id: args
-                .conjur_public_variable_id
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_PUBLIC_VARIABLE_ID is required"))?,
-            private_variable_id: args
-                .conjur_private_variable_id
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_PRIVATE_VARIABLE_ID is required"))?,
-            ca_cert_path: args.conjur_ca_cert_file.clone(),
-        }),
-        _ => None,
-    };
+    let conjur =
+        match kind {
+            KeySourceCli::Conjur => {
+                Some(ConjurConfig {
+                    appliance_url: args.conjur_appliance_url.clone().ok_or_else(|| {
+                        anyhow::anyhow!("ENCJSON_CONJUR_APPLIANCE_URL is required")
+                    })?,
+                    account: args
+                        .conjur_account
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_ACCOUNT is required"))?,
+                    authn_login: args
+                        .conjur_authn_login
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("ENCJSON_CONJUR_AUTHN_LOGIN is required"))?,
+                    authn_api_key: args.conjur_authn_api_key.clone().ok_or_else(|| {
+                        anyhow::anyhow!("ENCJSON_CONJUR_AUTHN_API_KEY is required")
+                    })?,
+                    public_variable_id: args.conjur_public_variable_id.clone().ok_or_else(
+                        || anyhow::anyhow!("ENCJSON_CONJUR_PUBLIC_VARIABLE_ID is required"),
+                    )?,
+                    private_variable_id: args.conjur_private_variable_id.clone().ok_or_else(
+                        || anyhow::anyhow!("ENCJSON_CONJUR_PRIVATE_VARIABLE_ID is required"),
+                    )?,
+                    ca_cert_path: args.conjur_ca_cert_file.clone(),
+                })
+            }
+            _ => None,
+        };
 
     Ok(Some(KeySourceOptions {
         kind: kind.to_core_kind(),
@@ -722,12 +739,10 @@ async fn bootstrap_key_from_source(
     let note = note.trim().to_string();
 
     let mut tx = db.begin().await?;
-    sqlx::query(
-        "insert into tenants (name) values ($1) on conflict (name) do nothing",
-    )
-    .bind(tenant)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("insert into tenants (name) values ($1) on conflict (name) do nothing")
+        .bind(tenant)
+        .execute(&mut *tx)
+        .await?;
 
     sqlx::query(
         "insert into keys (public_hex, private_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason) \
@@ -775,8 +790,7 @@ async fn bootstrap_key_from_source(
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -822,9 +836,9 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("../../migrations").run(&db).await?;
 
     if args.keys_bootstrap_from_source {
-        let source = key_source_options
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("ENCJSON_KEY_SOURCE is required when bootstrap is enabled"))?;
+        let source = key_source_options.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("ENCJSON_KEY_SOURCE is required when bootstrap is enabled")
+        })?;
         let ctx = require_policy_context(args.tenant.as_deref(), args.env_name.as_deref())
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let _ = bootstrap_key_from_source(
@@ -840,9 +854,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let jwks = if auth_required {
-        let issuer = jwt_issuer
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("ENCJSON_KEYS_JWT_ISSUER is required when auth is enabled"))?;
+        let issuer = jwt_issuer.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("ENCJSON_KEYS_JWT_ISSUER is required when auth is enabled")
+        })?;
         let url = jwks_url
             .clone()
             .unwrap_or_else(|| format!("{}/.well-known/jwks.json", issuer.trim_end_matches('/')));
@@ -915,7 +929,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/keys/{key_id}/bundle", get(get_key_bundle))
         .route("/api/v1/me", get(get_me))
         .route("/api/v1/tenants", get(list_tenants).post(create_tenant))
-        .route("/api/v1/tenants/{name}", patch(rename_tenant).delete(delete_tenant))
+        .route(
+            "/api/v1/tenants/{name}",
+            patch(rename_tenant).delete(delete_tenant),
+        )
         .route("/api/v1/statuses", get(list_statuses))
         .route("/api/v1/requests", get(list_requests).post(create_request))
         .route("/api/v1/requests/{id}", patch(update_request))
@@ -950,12 +967,14 @@ async fn main() -> anyhow::Result<()> {
     let app = app.with_state::<()>(state.clone());
     info!("listening on {}", addr);
     if state.mtls_required {
-        let cert_path = tls_cert_file
-            .ok_or_else(|| anyhow::anyhow!("ENCJSON_KEYS_TLS_CERT_FILE is required in mTLS mode"))?;
+        let cert_path = tls_cert_file.ok_or_else(|| {
+            anyhow::anyhow!("ENCJSON_KEYS_TLS_CERT_FILE is required in mTLS mode")
+        })?;
         let key_path = tls_key_file
             .ok_or_else(|| anyhow::anyhow!("ENCJSON_KEYS_TLS_KEY_FILE is required in mTLS mode"))?;
-        let client_ca_path = tls_client_ca_file
-            .ok_or_else(|| anyhow::anyhow!("ENCJSON_KEYS_TLS_CLIENT_CA_FILE is required in mTLS mode"))?;
+        let client_ca_path = tls_client_ca_file.ok_or_else(|| {
+            anyhow::anyhow!("ENCJSON_KEYS_TLS_CLIENT_CA_FILE is required in mTLS mode")
+        })?;
         serve_mtls(
             addr,
             app,
@@ -1007,7 +1026,8 @@ async fn list_keys(
         }
         builder.push(if has_where { " and " } else { " where " });
         has_where = true;
-        builder.push("tenant = any(")
+        builder
+            .push("tenant = any(")
             .push_bind(auth.tenants.clone())
             .push(")");
     }
@@ -1122,7 +1142,9 @@ async fn get_private_key(
             };
             let private_hex = match decrypt_private_hex(&state.encryption_secret, &private_hex) {
                 Ok(v) => v,
-                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response(),
+                Err(_) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response();
+                }
             };
             let _ = sqlx::query(
                 "insert into key_access_log (public_hex, tenant, subject, reason) values ($1, $2, $3, $4)",
@@ -1200,15 +1222,25 @@ async fn get_key_bundle(
             };
             let public_bundle: PublicBundle = match serde_json::from_value(public_bundle_value) {
                 Ok(v) => v,
-                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "invalid public bundle").into_response(),
+                Err(_) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "invalid public bundle")
+                        .into_response();
+                }
             };
-            let private_bundle_json = match decrypt_private_hex(&state.encryption_secret, &private_bundle_enc) {
-                Ok(v) => v,
-                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response(),
-            };
+            let private_bundle_json =
+                match decrypt_private_hex(&state.encryption_secret, &private_bundle_enc) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed")
+                            .into_response();
+                    }
+                };
             let private_bundle: PrivateBundle = match serde_json::from_str(&private_bundle_json) {
                 Ok(v) => v,
-                Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "invalid private bundle").into_response(),
+                Err(_) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "invalid private bundle")
+                        .into_response();
+                }
             };
 
             Json(KeyBundleResponse {
@@ -1261,9 +1293,10 @@ async fn patch_key(
 
     let tenant = payload.tenant.unwrap_or(existing.tenant);
     if let Some(ref status) = payload.status
-        && !is_valid_key_status(status) {
-            return (StatusCode::BAD_REQUEST, "invalid status").into_response();
-        }
+        && !is_valid_key_status(status)
+    {
+        return (StatusCode::BAD_REQUEST, "invalid status").into_response();
+    }
     let status = payload.status.unwrap_or(existing.status);
     let note = payload.note.or(existing.note);
     let tags = payload.tags.unwrap_or(existing.tags);
@@ -1291,10 +1324,7 @@ async fn patch_key(
     }
 }
 
-async fn list_tenants(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn list_tenants(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
         Err(resp) => return *resp,
@@ -1302,11 +1332,10 @@ async fn list_tenants(
     if !auth.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
     }
-    let rows = sqlx::query_as::<_, TenantRow>(
-        "select id, name, created_at from tenants order by name",
-    )
-    .fetch_all(&state.db)
-    .await;
+    let rows =
+        sqlx::query_as::<_, TenantRow>("select id, name, created_at from tenants order by name")
+            .fetch_all(&state.db)
+            .await;
     match rows {
         Ok(rows) => Json(rows).into_response(),
         Err(err) => server_error(err),
@@ -1434,28 +1463,19 @@ async fn delete_tenant(
             Err(err) => return server_error(err),
         };
     if keys_count > 0 {
-        return (
-            StatusCode::CONFLICT,
-            "tenant has associated keys",
-        )
-            .into_response();
+        return (StatusCode::CONFLICT, "tenant has associated keys").into_response();
     }
-    let requests_count = match sqlx::query_scalar::<_, i64>(
-        "select count(*) from requests where tenant = $1",
-    )
-    .bind(&name)
-    .fetch_one(&mut *tx)
-    .await
-    {
-        Ok(count) => count,
-        Err(err) => return server_error(err),
-    };
+    let requests_count =
+        match sqlx::query_scalar::<_, i64>("select count(*) from requests where tenant = $1")
+            .bind(&name)
+            .fetch_one(&mut *tx)
+            .await
+        {
+            Ok(count) => count,
+            Err(err) => return server_error(err),
+        };
     if requests_count > 0 {
-        return (
-            StatusCode::CONFLICT,
-            "tenant has associated requests",
-        )
-            .into_response();
+        return (StatusCode::CONFLICT, "tenant has associated requests").into_response();
     }
 
     let delete = sqlx::query("delete from tenants where name = $1")
@@ -1472,10 +1492,7 @@ async fn delete_tenant(
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn list_statuses(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn list_statuses(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
         Err(resp) => return *resp,
@@ -1568,16 +1585,22 @@ async fn create_request(
                 &payload.private_bundle,
             ) {
                 Ok(v) => v,
-                Err(_) => return (StatusCode::BAD_REQUEST, "invalid v3 key bundle").into_response(),
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, "invalid v3 key bundle").into_response();
+                }
             };
             let tags = payload.tags.unwrap_or_default();
             let public_bundle_value = match serde_json::to_value(&payload.public_bundle) {
                 Ok(v) => v,
-                Err(_) => return (StatusCode::BAD_REQUEST, "invalid public_bundle").into_response(),
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, "invalid public_bundle").into_response();
+                }
             };
             let private_bundle_json = match serde_json::to_string(&payload.private_bundle) {
                 Ok(v) => v,
-                Err(_) => return (StatusCode::BAD_REQUEST, "invalid private_bundle").into_response(),
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, "invalid private_bundle").into_response();
+                }
             };
             let private_bundle_enc =
                 match encrypt_private_hex(&state.encryption_secret, &private_bundle_json) {
@@ -1723,10 +1746,7 @@ struct ReencryptResult {
     requests_updated: i64,
 }
 
-async fn reencrypt_keys(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn reencrypt_keys(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let auth = match ensure_auth(&state, &headers) {
         Ok(auth) => auth,
         Err(resp) => return *resp,
@@ -2101,7 +2121,6 @@ struct UiKeyEditForm {
     tags: String,
 }
 
-
 #[derive(Deserialize)]
 struct UiTenantForm {
     name: String,
@@ -2152,15 +2171,14 @@ async fn ui_login(State(state): State<AppState>) -> impl IntoResponse {
         URL_SAFE_NO_PAD.encode(digest)
     };
 
-    state
-        .ui_states
-        .lock()
-        .await
-        .insert(state_token.clone(), UiAuthState {
+    state.ui_states.lock().await.insert(
+        state_token.clone(),
+        UiAuthState {
             code_verifier,
             nonce: nonce.clone(),
             created_at: Instant::now(),
-        });
+        },
+    );
 
     let redirect_uri = format!("{}/ui/callback", base_url.trim_end_matches('/'));
     let auth_url = format!(
@@ -2186,7 +2204,11 @@ async fn ui_callback(
         return (StatusCode::INTERNAL_SERVER_ERROR, "UI client_id missing").into_response();
     };
     let Some(client_secret) = state.ui.client_secret.clone() else {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "UI client_secret missing").into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "UI client_secret missing",
+        )
+            .into_response();
     };
     let Some(base_url) = state.ui.base_url.clone() else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "UI base_url missing").into_response();
@@ -2235,10 +2257,7 @@ async fn ui_callback(
         return (StatusCode::BAD_REQUEST, "invalid nonce").into_response();
     }
 
-    let groups = claims
-        .groups
-        .map(groups_to_vec)
-        .unwrap_or_default();
+    let groups = claims.groups.map(groups_to_vec).unwrap_or_default();
     let is_admin = groups.iter().any(|g| g == "encjson:role:admin");
     let is_scoped = groups.iter().any(|g| g == "encjson:role:scoped");
     if !is_admin && !is_scoped {
@@ -2250,8 +2269,8 @@ async fn ui_callback(
         .collect::<Vec<_>>();
 
     let sid = random_token();
-    let expires = Instant::now()
-        + Duration::from_secs(token.expires_in.unwrap_or(3600).max(300) as u64);
+    let expires =
+        Instant::now() + Duration::from_secs(token.expires_in.unwrap_or(3600).max(300) as u64);
     state.ui_sessions.lock().await.insert(
         sid.clone(),
         UiSession {
@@ -2283,7 +2302,9 @@ async fn decode_id_token(
     } else {
         let url = format!("{}/.well-known/jwks.json", issuer.trim_end_matches('/'));
         let jwks = load_jwks(&url).await?;
-        jwks.get(&kid).cloned().ok_or_else(|| anyhow::anyhow!("unknown kid"))?
+        jwks.get(&kid)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown kid"))?
     };
 
     let mut validation = Validation::new(header.alg);
@@ -2306,10 +2327,7 @@ async fn ui_logout(State(state): State<AppState>, headers: HeaderMap) -> impl In
     (StatusCode::FOUND, h, "").into_response()
 }
 
-async fn ui_require(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<UiSession, Response> {
+async fn ui_require(state: &AppState, headers: &HeaderMap) -> Result<UiSession, Response> {
     if let Some(sess) = ui_session(state, headers).await {
         return Ok(sess);
     }
@@ -2344,7 +2362,10 @@ async fn ui_keys_list(State(state): State<AppState>, headers: HeaderMap) -> impl
         if sess.tenants.is_empty() {
             return (StatusCode::FORBIDDEN, "no tenant access").into_response();
         }
-        builder.push(" where tenant = any(").push_bind(sess.tenants.clone()).push(")");
+        builder
+            .push(" where tenant = any(")
+            .push_bind(sess.tenants.clone())
+            .push(")");
     }
     builder.push(" order by created_at desc");
     let query = builder.build_query_as::<KeyRow>();
@@ -2353,7 +2374,11 @@ async fn ui_keys_list(State(state): State<AppState>, headers: HeaderMap) -> impl
         Err(err) => return server_error(err),
     };
     for k in list {
-        let tags = if k.tags.is_empty() { "-".to_string() } else { k.tags.join(", ") };
+        let tags = if k.tags.is_empty() {
+            "-".to_string()
+        } else {
+            k.tags.join(", ")
+        };
         let _ = write!(
             rows,
             r#"<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><a class="btn btn-sm btn-outline-primary" href="/ui/keys/{}">Edit</a></td></tr>"#,
@@ -2528,10 +2553,7 @@ async fn ui_request_create(
     Redirect::to("/ui/requests").into_response()
 }
 
-async fn ui_requests_list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn ui_requests_list(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
         Err(resp) => return resp,
@@ -2558,7 +2580,11 @@ async fn ui_requests_list(
     };
     let mut out = String::new();
     for r in rows {
-        let tags = if r.tags.is_empty() { "-".to_string() } else { r.tags.join(", ") };
+        let tags = if r.tags.is_empty() {
+            "-".to_string()
+        } else {
+            r.tags.join(", ")
+        };
         let actions = if sess.is_admin {
             format!(
                 r#"<form style="display:inline" method="post" action="/ui/requests/{}/approve"><button class="btn btn-sm btn-success">Approve</button></form>
@@ -2708,10 +2734,7 @@ async fn ui_tenants(State(state): State<AppState>, headers: HeaderMap) -> impl I
     (StatusCode::OK, html).into_response()
 }
 
-async fn ui_tenants_list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn ui_tenants_list(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
         Err(resp) => return resp,
@@ -2719,11 +2742,10 @@ async fn ui_tenants_list(
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
     }
-    let rows = sqlx::query_as::<_, TenantRow>(
-        "select id, name, created_at from tenants order by name",
-    )
-    .fetch_all(&state.db)
-    .await;
+    let rows =
+        sqlx::query_as::<_, TenantRow>("select id, name, created_at from tenants order by name")
+            .fetch_all(&state.db)
+            .await;
     let rows = match rows {
         Ok(v) => v,
         Err(err) => return server_error(err),
@@ -2834,7 +2856,6 @@ async fn ui_reencrypt(State(state): State<AppState>, headers: HeaderMap) -> impl
     Redirect::to("/ui/keys").into_response()
 }
 
-
 #[derive(Debug, Clone)]
 struct AuthContext {
     is_admin: bool,
@@ -2941,7 +2962,9 @@ fn load_private_key(path: &str) -> anyhow::Result<rustls::pki_types::PrivateKeyD
     Ok(key)
 }
 
-fn extract_spiffe_ids(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> Vec<String> {
+fn extract_spiffe_ids(
+    stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> Vec<String> {
     let (_, conn) = stream.get_ref();
     let Some(peer_certs) = conn.peer_certificates() else {
         return Vec::new();
@@ -2955,9 +2978,10 @@ fn extract_spiffe_ids(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpSt
             if let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() {
                 for name in &san.general_names {
                     if let GeneralName::URI(uri) = name
-                        && uri.starts_with("spiffe://") {
-                            out.push(uri.to_string());
-                        }
+                        && uri.starts_with("spiffe://")
+                    {
+                        out.push(uri.to_string());
+                    }
                 }
             }
         }
@@ -2973,21 +2997,29 @@ fn ensure_auth_spiffe_policy(
     spiffe_identity: Option<String>,
 ) -> Result<AuthContext, Box<Response>> {
     if !state.mtls_required {
-        return Err(Box::new((StatusCode::UNAUTHORIZED, "missing authorization").into_response()));
+        return Err(Box::new(
+            (StatusCode::UNAUTHORIZED, "missing authorization").into_response(),
+        ));
     }
     let Some(spiffe_id) = spiffe_identity else {
-        return Err(Box::new((
-            StatusCode::UNAUTHORIZED,
-            "missing SPIFFE identity from mTLS certificate",
-        )
-            .into_response()));
+        return Err(Box::new(
+            (
+                StatusCode::UNAUTHORIZED,
+                "missing SPIFFE identity from mTLS certificate",
+            )
+                .into_response(),
+        ));
     };
     if !spiffe_id.starts_with("spiffe://") {
-        return Err(Box::new((StatusCode::UNAUTHORIZED, "invalid SPIFFE identity").into_response()));
+        return Err(Box::new(
+            (StatusCode::UNAUTHORIZED, "invalid SPIFFE identity").into_response(),
+        ));
     }
     let env = header_string(headers, "x-encjson-env");
     let Some(policy) = state.policy.as_ref() else {
-        return Err(Box::new((StatusCode::FORBIDDEN, "policy file not configured").into_response()));
+        return Err(Box::new(
+            (StatusCode::FORBIDDEN, "policy file not configured").into_response(),
+        ));
     };
 
     let decision = evaluate(
@@ -3005,7 +3037,9 @@ fn ensure_auth_spiffe_policy(
         },
     );
     if !matches!(decision, Decision::Allow) {
-        return Err(Box::new((StatusCode::FORBIDDEN, "spiffe policy denied").into_response()));
+        return Err(Box::new(
+            (StatusCode::FORBIDDEN, "spiffe policy denied").into_response(),
+        ));
     }
 
     Ok(AuthContext {
@@ -3036,25 +3070,36 @@ fn ensure_auth(state: &AppState, headers: &HeaderMap) -> Result<AuthContext, Box
         });
     }
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
-        return Err(Box::new((StatusCode::UNAUTHORIZED, "missing authorization").into_response()));
+        return Err(Box::new(
+            (StatusCode::UNAUTHORIZED, "missing authorization").into_response(),
+        ));
     };
     let Ok(auth) = value.to_str() else {
-        return Err(Box::new((StatusCode::UNAUTHORIZED, "invalid authorization").into_response()));
+        return Err(Box::new(
+            (StatusCode::UNAUTHORIZED, "invalid authorization").into_response(),
+        ));
     };
     if !auth.starts_with("Bearer ") {
-        return Err(Box::new((StatusCode::UNAUTHORIZED, "invalid authorization").into_response()));
+        return Err(Box::new(
+            (StatusCode::UNAUTHORIZED, "invalid authorization").into_response(),
+        ));
     }
     let auth = auth.strip_prefix("Bearer ").unwrap_or(auth);
     let header = match decode_header(auth) {
         Ok(header) => header,
-        Err(_) => return Err(Box::new((StatusCode::UNAUTHORIZED, "invalid token").into_response())),
+        Err(_) => {
+            return Err(Box::new(
+                (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
+            ));
+        }
     };
-    let kid = header.kid.ok_or_else(|| {
-        Box::new((StatusCode::UNAUTHORIZED, "missing kid").into_response())
-    })?;
-    let key = state.jwks.get(&kid).ok_or_else(|| {
-        Box::new((StatusCode::UNAUTHORIZED, "unknown kid").into_response())
-    })?;
+    let kid = header
+        .kid
+        .ok_or_else(|| Box::new((StatusCode::UNAUTHORIZED, "missing kid").into_response()))?;
+    let key = state
+        .jwks
+        .get(&kid)
+        .ok_or_else(|| Box::new((StatusCode::UNAUTHORIZED, "unknown kid").into_response()))?;
     let mut validation = Validation::new(header.alg);
     if let Some(issuer) = state.jwt_issuer.as_ref() {
         validation.set_issuer(&[issuer.as_str()]);
@@ -3066,15 +3111,13 @@ fn ensure_auth(state: &AppState, headers: &HeaderMap) -> Result<AuthContext, Box
     }
     let token = decode::<Claims>(auth, key, &validation)
         .map_err(|_| Box::new((StatusCode::UNAUTHORIZED, "token invalid").into_response()))?;
-    let groups = token
-        .claims
-        .groups
-        .map(groups_to_vec)
-        .unwrap_or_default();
+    let groups = token.claims.groups.map(groups_to_vec).unwrap_or_default();
     let is_admin = groups.iter().any(|g| g == "encjson:role:admin");
     let is_scoped = groups.iter().any(|g| g == "encjson:role:scoped");
     if !is_admin && !is_scoped {
-        return Err(Box::new((StatusCode::FORBIDDEN, "role not allowed").into_response()));
+        return Err(Box::new(
+            (StatusCode::FORBIDDEN, "role not allowed").into_response(),
+        ));
     }
     let tenants = groups
         .iter()
@@ -3232,7 +3275,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("bundle key_id mismatch") || err.to_string().contains("key_id does not match"));
+        assert!(
+            err.to_string().contains("bundle key_id mismatch")
+                || err.to_string().contains("key_id does not match")
+        );
     }
 
     #[tokio::test]
@@ -3369,7 +3415,10 @@ mod tests {
         let created: RequestRow = serde_json::from_slice(&create_body)?;
         assert_eq!(created.key_id.as_deref(), Some(bundle.key_id.as_str()));
         assert_eq!(created.bundle_version, Some(3));
-        assert_eq!(created.algorithm.as_deref(), Some(bundle.algorithm.as_str()));
+        assert_eq!(
+            created.algorithm.as_deref(),
+            Some(bundle.algorithm.as_str())
+        );
         assert_eq!(created.tenant, tenant);
         assert_eq!(created.tags, tags);
 

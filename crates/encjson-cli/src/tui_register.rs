@@ -5,23 +5,24 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
-use ratatui::Terminal;
-use tui_input::backend::crossterm::EventHandler;
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState,
+};
 use tui_input::Input;
+use tui_input::backend::crossterm::EventHandler;
 
-use crate::{
-    RegisterPayload, RegisterPayloadLegacy, RegisterPayloadV3, send_register_request,
-};
+use crate::{RegisterPayload, RegisterPayloadLegacy, RegisterPayloadV3, send_register_request};
 use encjson_core::key_store::{StoredKeyMaterial, load_stored_key_material};
-use encjson_core::recipient::{
-    KeyComponentPrivate, PrivateBundle,
-};
+use encjson_core::recipient::{KeyComponentPrivate, PrivateBundle};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Mode {
@@ -84,7 +85,13 @@ pub fn run_register_tui(
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(keys, tenants);
-    let res = run_app(&mut terminal, &mut app, &keys_url, &token, keydir.as_deref());
+    let res = run_app(
+        &mut terminal,
+        &mut app,
+        &keys_url,
+        &token,
+        keydir.as_deref(),
+    );
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -109,19 +116,21 @@ fn run_app(
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)?
             && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-                    && handle_key(app, key, keys_url, token, keydir)? {
-                        break;
-                    }
+            && key.kind == KeyEventKind::Press
+            && handle_key(app, key, keys_url, token, keydir)?
+        {
+            break;
+        }
 
         if last_tick.elapsed() >= tick_rate {
             last_tick = Instant::now();
             if let Some(until) = app.status_until
-                && Instant::now() > until {
-                    app.status = "ready".to_string();
-                    app.status_error = false;
-                    app.status_until = None;
-                }
+                && Instant::now() > until
+            {
+                app.status = "ready".to_string();
+                app.status_error = false;
+                app.status_until = None;
+            }
         }
     }
 
@@ -251,11 +260,7 @@ fn handle_key(
                             })
                         }
                     };
-                    send_register_request(
-                        keys_url,
-                        token,
-                        payload,
-                    )?;
+                    send_register_request(keys_url, token, payload)?;
                     app.keys.remove(app.selected);
                     if app.selected >= app.keys.len() && app.selected > 0 {
                         app.selected -= 1;
@@ -285,9 +290,10 @@ fn handle_key(
             }
             KeyCode::Enter => {
                 if let Some(draft) = app.draft.as_mut()
-                    && let Some(value) = app.tenants.get(app.edit_field) {
-                        draft.tenant = value.clone();
-                    }
+                    && let Some(value) = app.tenants.get(app.edit_field)
+                {
+                    draft.tenant = value.clone();
+                }
                 app.edit_field = 0;
                 app.mode = Mode::Edit;
             }
@@ -359,7 +365,11 @@ fn handle_key(
 fn render(f: &mut ratatui::Frame<'_>, app: &App) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(f.area());
 
     render_list(f, app, layout[0]);
@@ -592,7 +602,9 @@ fn render_select_dialog(
 fn form_line(label: &str, value: &str, active: bool) -> Line<'static> {
     let prefix = if active { "> " } else { "  " };
     let style = if active {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::White)
     };
@@ -625,7 +637,11 @@ fn list_offset(selected: usize, height: usize) -> usize {
     (selected + 1).saturating_sub(height)
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    area: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -646,7 +662,11 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: ratatui::layout::Rect) ->
     horizontal[1]
 }
 
-fn centered_rect_fixed(width: u16, height: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+fn centered_rect_fixed(
+    width: u16,
+    height: u16,
+    area: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
