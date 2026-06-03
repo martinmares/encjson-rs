@@ -18,6 +18,7 @@ Goal: keep binaries thin and move reusable logic into shared crate(s) for next s
 
 ## Design Docs
 
+- Architecture anchor: `docs/ARCHITECTURE.md`
 - Key sources and secure loading model: `docs/KEY_SOURCES.md` (proposed design)
 - Key sources implementation plan: `docs/KEY_SOURCES_RFC.md` (phase checklist + acceptance criteria)
 
