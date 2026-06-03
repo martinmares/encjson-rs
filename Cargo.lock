@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "encjson-cli"
-version = "0.6.5"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1049,6 +1049,7 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "sha2",
  "thiserror 2.0.18",
  "tokio",
@@ -1060,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "encjson-keys-ctl"
-version = "0.2.0"
+version = "0.6.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1095,7 +1096,6 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2",
- "simple-policy-engine",
  "sqlx",
  "tokio",
  "tokio-rustls",
@@ -3584,15 +3584,6 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest",
  "rand_core 0.6.4",
-]
-
-[[package]]
-name = "simple-policy-engine"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_yaml_ng",
- "thiserror 2.0.18",
 ]
 
 [[package]]

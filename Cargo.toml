@@ -53,5 +53,4 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 x509-parser = "0.18"
 tower-service = "0.3"
-simple-policy-engine = { path = "../simple-policy-engine" }
 encjson-core = { path = "crates/encjson-core" }
