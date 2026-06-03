@@ -195,7 +195,7 @@ Optional SPIFFE policy authorization:
 export ENCJSON_KEYS_POLICY_FILE=/etc/encjson/policy.yaml
 ```
 
-Policy loading/validation is handled by shared crate `simple-policy-engine`
+Policy loading/validation is handled by `encjson-core::policy_engine`
 with profile `EncjsonKeys`.
 
 Example `policy.yaml`:
