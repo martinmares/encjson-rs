@@ -20,6 +20,7 @@ use tracing::{error, info};
 mod api_error;
 mod args;
 mod auth;
+mod authz;
 mod crypto_store;
 mod handlers_keys;
 mod handlers_requests;
@@ -35,6 +36,7 @@ mod ui_state;
 
 use args::{Args, KeySourceCli};
 use auth::{ensure_auth, ensure_auth_spiffe_policy, get_me, load_jwks, serve_mtls};
+use authz::BearerAuthzPolicy;
 use handlers_keys::{get_key, get_key_bundle, get_private_key, list_keys, patch_key};
 use handlers_requests::{
     approve_request, create_request, list_requests, reject_request, update_request,
@@ -290,6 +292,15 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => None,
     };
+    let bearer_authz = match args.keys_authz_file {
+        Some(path) if !path.trim().is_empty() => {
+            let parsed = BearerAuthzPolicy::from_file(std::path::Path::new(&path))
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            info!("loaded bearer authz file {}", path);
+            Some(parsed)
+        }
+        _ => None,
+    };
 
     let state = AppState {
         db,
@@ -312,6 +323,7 @@ async fn main() -> anyhow::Result<()> {
         ui_states: Arc::new(Mutex::new(HashMap::new())),
         ui_sessions: Arc::new(Mutex::new(HashMap::new())),
         policy,
+        bearer_authz,
         mtls_required,
         bootstrap: BootstrapCfg {
             source_options: key_source_options,
@@ -444,6 +456,7 @@ mod tests {
             ui_states: Arc::new(Mutex::new(HashMap::new())),
             ui_sessions: Arc::new(Mutex::new(HashMap::new())),
             policy: None,
+            bearer_authz: None,
             mtls_required: false,
             bootstrap: BootstrapCfg {
                 source_options: None,

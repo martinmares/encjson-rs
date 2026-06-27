@@ -24,6 +24,7 @@ use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::ParsedExtension;
 
 use crate::api_error::api_error;
+use crate::authz::BearerAuthzPolicy;
 use crate::state::{
     AppState, AuthIssuer, AuthIssuerKind, AuthMethod, MtlsCfg, MtlsSpiffeIdentity, Principal,
     PrincipalKind,
@@ -355,7 +356,7 @@ pub(crate) fn ensure_auth(
                 continue;
             }
         };
-        return auth_context_from_claims(issuer, token.claims);
+        return auth_context_from_claims(state.bearer_authz.as_ref(), issuer, token.claims);
     }
     if unknown_kid {
         return Err(Box::new(api_error(StatusCode::UNAUTHORIZED, "unknown kid")));
@@ -373,6 +374,7 @@ pub(crate) fn ensure_auth(
 }
 
 fn auth_context_from_claims(
+    policy: Option<&BearerAuthzPolicy>,
     issuer: &AuthIssuer,
     claims: Claims,
 ) -> Result<AuthContext, Box<Response>> {
@@ -380,20 +382,30 @@ fn auth_context_from_claims(
     if issuer.kind == AuthIssuerKind::KubeSaJwt {
         validate_kube_service_account_claims(&claims)?;
     }
-    let is_admin = groups.iter().any(|g| g == "encjson:role:admin");
-    let is_scoped = groups.iter().any(|g| g == "encjson:role:scoped");
+    let mut is_admin = groups.iter().any(|g| g == "encjson:role:admin");
+    let mut is_scoped = groups.iter().any(|g| g == "encjson:role:scoped");
+    let mut tenants = groups
+        .iter()
+        .filter_map(|g| g.strip_prefix("encjson:tenant:").map(|v| v.to_string()))
+        .collect::<Vec<_>>();
+    let subject = claims.sub.clone();
+    let principal = principal_from_claims(issuer, &claims, groups.clone());
+
+    if let Some(policy) = policy {
+        let grant = policy.evaluate(&principal);
+        is_admin = is_admin || grant.is_admin;
+        is_scoped = is_scoped || grant.is_scoped;
+        tenants.extend(grant.tenants);
+        tenants.sort();
+        tenants.dedup();
+    }
+
     if !is_admin && !is_scoped {
         return Err(Box::new(api_error(
             StatusCode::FORBIDDEN,
             "role not allowed",
         )));
     }
-    let tenants = groups
-        .iter()
-        .filter_map(|g| g.strip_prefix("encjson:tenant:").map(|v| v.to_string()))
-        .collect();
-    let subject = claims.sub.clone();
-    let principal = principal_from_claims(issuer, &claims, groups.clone());
     Ok(AuthContext {
         is_admin,
         is_scoped,
@@ -644,7 +656,7 @@ mod tests {
             kubernetes: None,
         };
 
-        let ctx = auth_context_from_claims(&simple_issuer(), claims).unwrap();
+        let ctx = auth_context_from_claims(None, &simple_issuer(), claims).unwrap();
         assert!(!ctx.is_admin);
         assert!(ctx.is_scoped);
         assert_eq!(ctx.tenants, vec!["o2"]);
@@ -679,7 +691,7 @@ mod tests {
             }),
         };
 
-        let ctx = auth_context_from_claims(&kube_issuer(), claims).unwrap();
+        let ctx = auth_context_from_claims(None, &kube_issuer(), claims).unwrap();
         assert_eq!(ctx.principal.issuer, ISSUER_KUBE_SA_JWT);
         assert_eq!(ctx.principal.kind, PrincipalKind::Workload);
         assert_eq!(ctx.principal.namespace.as_deref(), Some("zis-test"));
@@ -708,7 +720,52 @@ mod tests {
             }),
         };
 
-        let err = auth_context_from_claims(&kube_issuer(), claims).unwrap_err();
+        let err = auth_context_from_claims(None, &kube_issuer(), claims).unwrap_err();
         assert_eq!(err.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn kube_sa_claims_can_be_authorized_by_local_policy_without_groups() {
+        let policy = BearerAuthzPolicy::from_yaml(
+            r#"
+authz:
+  rules:
+    - principal:
+        issuer: kube-sa-jwt
+        kind: workload
+        namespace: zis-test
+        service_account: order-api
+      allow:
+        - keys:read
+      tenants:
+        - o2
+"#,
+        )
+        .unwrap();
+        let claims = Claims {
+            sub: Some("system:serviceaccount:zis-test:order-api".to_string()),
+            iss: Some("https://kubernetes.default.svc".to_string()),
+            aud: Some(serde_json::json!("key-server")),
+            exp: 123,
+            scope: None,
+            client_id: None,
+            email: None,
+            preferred_username: None,
+            groups: None,
+            nonce: None,
+            kubernetes: Some(KubernetesClaims {
+                namespace: Some("zis-test".to_string()),
+                serviceaccount: Some(KubernetesServiceAccountClaims {
+                    name: Some("order-api".to_string()),
+                }),
+                pod: None,
+            }),
+        };
+
+        let ctx = auth_context_from_claims(Some(&policy), &kube_issuer(), claims).unwrap();
+        assert!(!ctx.is_admin);
+        assert!(ctx.is_scoped);
+        assert_eq!(ctx.tenants, vec!["o2"]);
+        assert_eq!(ctx.groups, Vec::<String>::new());
     }
 }

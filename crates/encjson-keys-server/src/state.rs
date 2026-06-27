@@ -8,6 +8,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
+use crate::authz::BearerAuthzPolicy;
 use crate::rate_limit::{RateLimitCfg, RateLimiter};
 use crate::ui_state::{UiAuthState, UiCfg, UiSession};
 
@@ -23,6 +24,7 @@ pub(crate) struct AppState {
     pub(crate) ui_states: Arc<Mutex<HashMap<String, UiAuthState>>>,
     pub(crate) ui_sessions: Arc<Mutex<HashMap<String, UiSession>>>,
     pub(crate) policy: Option<Policy>,
+    pub(crate) bearer_authz: Option<BearerAuthzPolicy>,
     pub(crate) mtls_required: bool,
     pub(crate) bootstrap: BootstrapCfg,
 }

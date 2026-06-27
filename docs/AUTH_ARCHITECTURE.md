@@ -329,42 +329,47 @@ The service should own:
 Example local policy for `encjson-keys-server`:
 
 ```yaml
-rules:
-  - principal:
-      issuer: simple-idm-jwt
-      groups:
-        - encjson:role:admin
-    allow:
-      - keys:admin
+authz:
+  rules:
+    - id: admin-group
+      principal:
+        issuer: simple-idm-jwt
+        groups:
+          - encjson:role:admin
+      allow:
+        - keys:admin
 
-  - principal:
-      issuer: simple-idm-jwt
-      groups:
-        - encjson:tenant:o2
-    allow:
-      - keys:read
-    tenants:
-      - o2
-
-  - principal:
-      issuer: simple-idm-jwt
-      client_id: gitlab-ci
-      scopes:
+    - id: tenant-o2-read
+      principal:
+        issuer: simple-idm-jwt
+        groups:
+          - encjson:tenant:o2
+      allow:
         - keys:read
-    allow:
-      - keys:read
-    tenants:
-      - o2
+      tenants:
+        - o2
 
-  - principal:
-      issuer: kube-sa-jwt
-      namespace: zis-test
-      service_account: order-api
-    allow:
-      - keys:read
-    keys:
-      - order-api
-      - common
+    - id: gitlab-o2-read
+      principal:
+        issuer: simple-idm-jwt
+        client_id: gitlab-ci
+        scopes:
+          - keys:read
+      allow:
+        - keys:read
+      tenants:
+        - o2
+
+    - id: order-api-o2-read
+      principal:
+        issuer: kube-sa-jwt
+        kind: workload
+        namespace: zis-test
+        service_account: order-api
+      allow:
+        - keys:read
+      tenants:
+        - o2
 ```
 
 ## OpenShift ServiceAccount JWT Requirements
@@ -425,7 +430,7 @@ These services should follow the same pattern:
 3. [x] Implement `simple-idm-jwt` as the first issuer backend.
 4. [x] Implement `kube-sa-jwt` as the second issuer backend.
 5. [x] Normalize accepted bearer JWT identities into `Principal`.
-6. Move key access decisions to a local policy evaluator.
+6. [x] Move bearer-token key access decisions to a local policy evaluator.
 7. Reuse the same pattern in other services manually, without extracting a
    shared library too early.
 
@@ -433,6 +438,7 @@ Current `kube-sa-jwt` implementation note:
 
 - accepts explicit `ENCJSON_KEYS_KUBE_SA_JWKS_URL`
 - validates issuer, audience, signature and ServiceAccount claim consistency
+- supports local authorization grants through `ENCJSON_KEYS_AUTHZ_FILE`
 - does not yet perform Kubernetes OIDC discovery automatically
 - does not yet refresh JWKS on unknown `kid`
 

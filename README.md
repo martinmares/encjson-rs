@@ -194,6 +194,39 @@ This enables the `kube-sa-jwt` issuer. The server validates the token signature,
 issuer, audience and ServiceAccount identity claims, then normalizes the caller
 into the internal principal model.
 
+Bearer-token authorization is local to the keys server. Use
+`ENCJSON_KEYS_AUTHZ_FILE` to map normalized principals to key-server roles and
+tenant access:
+
+```bash
+export ENCJSON_KEYS_AUTHZ_FILE=/etc/encjson/bearer-authz.yaml
+```
+
+Example `bearer-authz.yaml`:
+
+```yaml
+authz:
+  rules:
+    - id: admin-group
+      principal:
+        issuer: simple-idm-jwt
+        groups:
+          - encjson:role:admin
+      allow:
+        - keys:admin
+
+    - id: order-api-read-o2
+      principal:
+        issuer: kube-sa-jwt
+        kind: workload
+        namespace: zis-test
+        service_account: order-api
+      allow:
+        - keys:read
+      tenants:
+        - o2
+```
+
 Legacy true mTLS mode (client cert required, not the target architecture):
 
 ```bash
@@ -279,6 +312,27 @@ export ENCJSON_KEYS_KUBE_SA_AUDIENCE=key-server
 ```
 
 The workload issuer is named `kube-sa-jwt`.
+
+To grant workloads access to tenants, configure local bearer authorization:
+
+```bash
+export ENCJSON_KEYS_AUTHZ_FILE=/etc/encjson/bearer-authz.yaml
+```
+
+```yaml
+authz:
+  rules:
+    - id: order-api-read-o2
+      principal:
+        issuer: kube-sa-jwt
+        kind: workload
+        namespace: zis-test
+        service_account: order-api
+      allow:
+        - keys:read
+      tenants:
+        - o2
+```
 
 ### Legacy Mode 2: True mTLS + SPIFFE policy
 
@@ -369,6 +423,7 @@ This project now uses a unified model: every supported runtime environment varia
 | `ENCJSON_KEYS_KUBE_SA_AUDIENCE` | `--keys-kube-sa-audience` |
 | `ENCJSON_KEYS_MTLS_MODE` | `--keys-mtls-mode` |
 | `ENCJSON_KEYS_POLICY_FILE` | `--keys-policy-file` |
+| `ENCJSON_KEYS_AUTHZ_FILE` | `--keys-authz-file` |
 | `ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE` | `--keys-rate-limit-per-minute` |
 | `ENCJSON_KEYS_REQUESTS_RATE_LIMIT_PER_MINUTE` | `--keys-requests-rate-limit-per-minute` |
 | `ENCJSON_KEYS_UI_ENABLED` | `--keys-ui-enabled` |
