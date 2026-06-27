@@ -580,6 +580,25 @@ pub(crate) async fn load_jwks(
     Ok(map)
 }
 
+#[derive(Debug, Deserialize)]
+struct OidcDiscoveryDocument {
+    jwks_uri: String,
+}
+
+pub(crate) async fn discover_jwks_uri(url: &str) -> anyhow::Result<String> {
+    let body = reqwest::get(url).await?.text().await?;
+    parse_discovery_jwks_uri(&body)
+}
+
+fn parse_discovery_jwks_uri(body: &str) -> anyhow::Result<String> {
+    let doc: OidcDiscoveryDocument = serde_json::from_str(body)?;
+    let jwks_uri = doc.jwks_uri.trim();
+    if jwks_uri.is_empty() {
+        anyhow::bail!("OIDC discovery document has empty jwks_uri");
+    }
+    Ok(jwks_uri.to_string())
+}
+
 pub(crate) async fn decode_id_token(
     state: &AppState,
     token: &str,
@@ -767,5 +786,23 @@ authz:
         assert!(ctx.is_scoped);
         assert_eq!(ctx.tenants, vec!["o2"]);
         assert_eq!(ctx.groups, Vec::<String>::new());
+    }
+
+    #[test]
+    fn discovery_document_parses_jwks_uri() {
+        let uri = parse_discovery_jwks_uri(
+            r#"{
+              "issuer": "https://kubernetes.default.svc",
+              "jwks_uri": "https://kubernetes.default.svc/openid/v1/jwks"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(uri, "https://kubernetes.default.svc/openid/v1/jwks");
+    }
+
+    #[test]
+    fn discovery_document_rejects_empty_jwks_uri() {
+        let err = parse_discovery_jwks_uri(r#"{"jwks_uri": ""}"#).unwrap_err();
+        assert!(err.to_string().contains("empty jwks_uri"));
     }
 }

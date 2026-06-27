@@ -35,7 +35,9 @@ mod ui_html;
 mod ui_state;
 
 use args::{Args, KeySourceCli};
-use auth::{ensure_auth, ensure_auth_spiffe_policy, get_me, load_jwks, serve_mtls};
+use auth::{
+    discover_jwks_uri, ensure_auth, ensure_auth_spiffe_policy, get_me, load_jwks, serve_mtls,
+};
 use authz::BearerAuthzPolicy;
 use handlers_keys::{get_key, get_key_bundle, get_private_key, list_keys, patch_key};
 use handlers_requests::{
@@ -240,16 +242,33 @@ async fn main() -> anyhow::Result<()> {
             .map(|v| v.trim())
             .filter(|v| !v.is_empty())
         {
-            let kube_jwks_url = args
+            let kube_jwks_url = if let Some(url) = args
                 .keys_kube_sa_jwks_url
                 .as_ref()
                 .map(|v| v.trim())
                 .filter(|v| !v.is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "ENCJSON_KEYS_KUBE_SA_JWKS_URL is required when kube-sa-jwt auth is enabled"
-                    )
-                })?;
+            {
+                url.to_string()
+            } else {
+                let discovery_url = args
+                    .keys_kube_sa_discovery_url
+                    .as_ref()
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{}/.well-known/openid-configuration",
+                            kube_issuer.trim_end_matches('/')
+                        )
+                    });
+                info!(
+                    issuer_name = ISSUER_KUBE_SA_JWT,
+                    issuer = kube_issuer,
+                    discovery_url = discovery_url,
+                    "loading auth issuer discovery document"
+                );
+                discover_jwks_uri(&discovery_url).await?
+            };
             info!(
                 issuer_name = ISSUER_KUBE_SA_JWT,
                 issuer = kube_issuer,
@@ -261,7 +280,7 @@ async fn main() -> anyhow::Result<()> {
                 kind: AuthIssuerKind::KubeSaJwt,
                 issuer: kube_issuer.to_string(),
                 audience: args.keys_kube_sa_audience.clone(),
-                jwks: load_jwks(kube_jwks_url).await?,
+                jwks: load_jwks(&kube_jwks_url).await?,
             });
         }
         issuers

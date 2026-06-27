@@ -186,13 +186,18 @@ Optional Kubernetes/OpenShift projected ServiceAccount JWT issuer:
 
 ```bash
 export ENCJSON_KEYS_KUBE_SA_ISSUER=https://kubernetes.default.svc
-export ENCJSON_KEYS_KUBE_SA_JWKS_URL=https://kubernetes.default.svc/openid/v1/jwks
 export ENCJSON_KEYS_KUBE_SA_AUDIENCE=key-server
 ```
 
 This enables the `kube-sa-jwt` issuer. The server validates the token signature,
 issuer, audience and ServiceAccount identity claims, then normalizes the caller
 into the internal principal model.
+
+JWKS discovery order:
+
+1. use `ENCJSON_KEYS_KUBE_SA_JWKS_URL` when set,
+2. otherwise use `ENCJSON_KEYS_KUBE_SA_DISCOVERY_URL` when set,
+3. otherwise use `{ENCJSON_KEYS_KUBE_SA_ISSUER}/.well-known/openid-configuration`.
 
 Bearer-token authorization is local to the keys server. Use
 `ENCJSON_KEYS_AUTHZ_FILE` to map normalized principals to key-server roles and
@@ -307,11 +312,14 @@ Optional workload issuer:
 
 ```bash
 export ENCJSON_KEYS_KUBE_SA_ISSUER=https://kubernetes.default.svc
-export ENCJSON_KEYS_KUBE_SA_JWKS_URL=https://kubernetes.default.svc/openid/v1/jwks
 export ENCJSON_KEYS_KUBE_SA_AUDIENCE=key-server
 ```
 
 The workload issuer is named `kube-sa-jwt`.
+By default the server loads JWKS URL from
+`{ENCJSON_KEYS_KUBE_SA_ISSUER}/.well-known/openid-configuration`. Set
+`ENCJSON_KEYS_KUBE_SA_DISCOVERY_URL` to override the discovery document URL, or
+`ENCJSON_KEYS_KUBE_SA_JWKS_URL` to bypass discovery entirely.
 
 To grant workloads access to tenants, configure local bearer authorization:
 
@@ -420,6 +428,7 @@ This project now uses a unified model: every supported runtime environment varia
 | `ENCJSON_KEYS_JWT_AUDIENCE` | `--keys-jwt-audience` |
 | `ENCJSON_KEYS_KUBE_SA_ISSUER` | `--keys-kube-sa-issuer` |
 | `ENCJSON_KEYS_KUBE_SA_JWKS_URL` | `--keys-kube-sa-jwks-url` |
+| `ENCJSON_KEYS_KUBE_SA_DISCOVERY_URL` | `--keys-kube-sa-discovery-url` |
 | `ENCJSON_KEYS_KUBE_SA_AUDIENCE` | `--keys-kube-sa-audience` |
 | `ENCJSON_KEYS_MTLS_MODE` | `--keys-mtls-mode` |
 | `ENCJSON_KEYS_POLICY_FILE` | `--keys-policy-file` |
