@@ -1,0 +1,439 @@
+# Authentication and Authorization Architecture
+
+This document is the binding architecture contract for authentication and
+authorization across the `encjson-rs` ecosystem and related Simple services.
+
+The goal is to keep the model simple, explicit, and reusable across services
+without introducing a central online authorization dependency for every request.
+
+## Scope
+
+This contract applies to services such as:
+
+- `encjson-keys-server`
+- `simple-oci-registry`
+- `simple-config-server`
+- `simple-artifacts-server`
+- `simple-deploy-server`
+- deployment/sync tools and related CLIs
+
+Not every service has to implement every mode immediately. The contract defines
+the supported direction.
+
+## Core Decision
+
+There are two supported authentication mechanisms:
+
+1. Bearer token authentication
+2. Trusted proxy headers
+
+These mechanisms are complementary.
+
+```text
+Bearer JWT token       = cryptographic trust in a signed token
+X-Auth-* headers       = topological trust in a protected proxy boundary
+```
+
+`simple-idm-server` is the primary identity provider for humans, CLIs, GitLab,
+and service-to-service clients.
+
+Kubernetes/OpenShift is also a valid identity provider for workloads through
+projected ServiceAccount tokens.
+
+This means `simple-idm-server` is not the only possible issuer. It is one
+trusted issuer among the configured issuers.
+
+## Explicit Non-Goals
+
+The current target architecture does not include:
+
+- mTLS between all services
+- SPIFFE/SPIRE
+- service mesh identity
+- OPA sidecars for every request
+- token introspection on every request
+- one new central authorization server for every service call
+
+These can be reconsidered later only if there is a concrete operational or
+regulatory need. For the current stack they add too much complexity.
+
+## Authentication Modes
+
+### 1. Browser to UI
+
+Preferred model for UI/FE applications that should not implement full OIDC
+logic themselves:
+
+```text
+Browser
+  -> Nginx / ingress
+  -> simple-idm-oauth2-proxy
+  -> application
+```
+
+The proxy performs OIDC login and session handling through `simple-idm-server`.
+The application receives identity through trusted headers:
+
+```http
+X-Auth-User: mares
+X-Auth-Email: mares@example.com
+X-Auth-Subject: 97173b5f-6277-4aa7-b15e-a6c0b03cf0fd
+X-Auth-Groups: app:role:admin,app:tenant:o2
+```
+
+This model is suitable for:
+
+- internal web UIs
+- admin consoles
+- dashboard-like tools
+- apps where auth should stay outside the application
+
+### 2. API and CLI to Service
+
+Preferred model for APIs and CLI tools:
+
+```text
+Client / CLI
+  -> Authorization: Bearer <access-token>
+  -> target service
+```
+
+The service validates the JWT locally:
+
+- issuer
+- signature through JWKS
+- audience
+- expiration / not-before
+- scopes
+- groups / roles
+
+This model is suitable for:
+
+- REST APIs
+- CLIs
+- backend endpoints
+- automation
+- GitLab / CI calls
+
+### 3. Service to Service
+
+Preferred model:
+
+```text
+caller service
+  -> client_credentials token from simple-idm-server
+  -> target service with Authorization: Bearer <access-token>
+```
+
+Example:
+
+```text
+client_id = gitlab-ci
+audience  = encjson-keys-server
+scope     = keys:read
+```
+
+The target service validates:
+
+- issuer is `simple-idm-jwt`
+- audience matches the target service
+- scope allows the operation
+- client identity is allowed by local policy
+
+### 4. OpenShift Workload to Service
+
+Preferred model for Pods running in Kubernetes/OpenShift:
+
+```text
+Pod
+  -> projected ServiceAccount token
+  -> Authorization: Bearer <jwt>
+  -> target service
+```
+
+The target service validates the token locally using Kubernetes/OpenShift OIDC
+discovery and JWKS.
+
+This is not handled by `simple-idm-server`. Kubernetes/OpenShift is the issuer
+for workload identity.
+
+Expected claims:
+
+```json
+{
+  "sub": "system:serviceaccount:zis-test:order-api",
+  "kubernetes.io": {
+    "namespace": "zis-test",
+    "serviceaccount": {
+      "name": "order-api"
+    }
+  }
+}
+```
+
+The normalized workload identity is:
+
+```text
+namespace/serviceAccount
+```
+
+Example:
+
+```text
+zis-test/order-api
+```
+
+Pod name must not be used as the authorization identity because it changes on
+rollout. Pod UID/name may be used only for audit logging.
+
+## Trusted Proxy Header Rules
+
+Applications may trust `X-Auth-*` headers only if they are reachable exclusively
+through a trusted proxy.
+
+Required rule:
+
+```text
+public traffic -> trusted proxy -> application
+```
+
+Forbidden rule:
+
+```text
+public traffic -> application
+```
+
+The public edge must strip any client-supplied auth headers and set trusted
+headers only after successful authentication.
+
+Headers such as `X-Auth-Token` must not be forwarded by default. Forward a raw
+access token only when the downstream application explicitly needs delegated API
+calls.
+
+## Bearer Token Issuers
+
+Services that accept bearer tokens should support multiple configured issuers.
+
+Conceptual configuration:
+
+```yaml
+auth:
+  issuers:
+    - name: simple-idm-jwt
+      type: oidc
+      issuer: https://sso.cloud-app.cz
+      jwks_url: https://sso.cloud-app.cz/.well-known/jwks.json
+      audience: encjson-keys-server
+
+    - name: kube-sa-jwt
+      type: kubernetes_service_account
+      issuer: https://kubernetes.default.svc
+      discovery_url: https://kubernetes.default.svc/.well-known/openid-configuration
+      audience: key-server
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      service_account_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+```
+
+Issuer names are stable policy-facing identifiers.
+
+Recommended names:
+
+```text
+simple-idm-jwt
+kube-sa-jwt
+```
+
+`kube-sa-jwt` means Kubernetes/OpenShift projected ServiceAccount JWT.
+
+## Normalized Principal
+
+Every accepted authentication method must be normalized into one internal
+principal shape.
+
+Conceptual structure:
+
+```text
+Principal {
+  auth_method: bearer_token | trusted_proxy_headers
+  issuer: simple-idm-jwt | kube-sa-jwt | proxy
+  kind: user | service | workload
+  subject: string
+  groups: [string]
+  scopes: [string]
+  audience: [string]
+  client_id: optional string
+  email: optional string
+  username: optional string
+  namespace: optional string
+  service_account: optional string
+}
+```
+
+Examples:
+
+```text
+Human via Simple IDM:
+  issuer = simple-idm-jwt
+  kind = user
+  subject = 97173b5f-6277-4aa7-b15e-a6c0b03cf0fd
+  groups = ["encjson:role:admin"]
+
+GitLab via Simple IDM client credentials:
+  issuer = simple-idm-jwt
+  kind = service
+  client_id = gitlab-ci
+  scopes = ["keys:read"]
+
+OpenShift workload:
+  issuer = kube-sa-jwt
+  kind = workload
+  subject = system:serviceaccount:zis-test:order-api
+  namespace = zis-test
+  service_account = order-api
+```
+
+## Authorization Model
+
+Identity providers prove identity. Target services decide local business
+authorization.
+
+In other words:
+
+```text
+Simple IDM / Kubernetes says who you are.
+The target service decides what you may do.
+```
+
+Services should avoid pushing detailed business policy into Simple IDM.
+
+Simple IDM should provide:
+
+- subject
+- client id
+- groups
+- scopes
+- audience
+- issuer
+- expiration
+
+The service should own:
+
+- tenant access
+- resource access
+- operation-level permissions
+- approval workflows
+- audit decisions
+
+## Example Policy
+
+Example local policy for `encjson-keys-server`:
+
+```yaml
+rules:
+  - principal:
+      issuer: simple-idm-jwt
+      groups:
+        - encjson:role:admin
+    allow:
+      - keys:admin
+
+  - principal:
+      issuer: simple-idm-jwt
+      groups:
+        - encjson:tenant:o2
+    allow:
+      - keys:read
+    tenants:
+      - o2
+
+  - principal:
+      issuer: simple-idm-jwt
+      client_id: gitlab-ci
+      scopes:
+        - keys:read
+    allow:
+      - keys:read
+    tenants:
+      - o2
+
+  - principal:
+      issuer: kube-sa-jwt
+      namespace: zis-test
+      service_account: order-api
+    allow:
+      - keys:read
+    keys:
+      - order-api
+      - common
+```
+
+## OpenShift ServiceAccount JWT Requirements
+
+For Kubernetes/OpenShift projected ServiceAccount tokens, the service must:
+
+- load OIDC discovery document
+- load JWKS
+- validate `kid`
+- validate signature
+- accept only the configured algorithm, normally `RS256`
+- validate issuer
+- validate audience
+- validate expiration and not-before
+- refresh JWKS on unknown `kid`
+- validate `sub` matches namespace and serviceAccount claims
+- never use pod name as the authorization identity
+- never log the full JWT token
+
+TokenReview API is not required for this model.
+
+## Service-Specific Direction
+
+### encjson-keys-server
+
+`encjson-keys-server` should accept bearer tokens from:
+
+- `simple-idm-jwt`
+- `kube-sa-jwt`
+
+It should use the normalized principal and local policy to decide whether a key
+may be read, registered, approved, or administered.
+
+This is the first service where the multi-issuer model should be implemented.
+
+### simple-oci-registry-like UI Services
+
+Services with backend plus frontend UI should support both:
+
+- trusted proxy headers for browser UI
+- bearer token validation for API access
+
+This makes the same service usable from browser, CLI, automation, and other
+services without forcing every user-facing app to implement its own OIDC login.
+
+### simple-config-server / simple-artifacts-server / simple-deploy-server
+
+These services should follow the same pattern:
+
+- UI/browser entry can be protected by proxy headers
+- API endpoints should accept bearer tokens
+- service-specific authorization remains local
+
+## Implementation Order
+
+1. Keep this document as the architecture contract.
+2. Refactor `encjson-keys-server` auth into issuer-based validation.
+3. Implement `simple-idm-jwt` as the first issuer backend.
+4. Implement `kube-sa-jwt` as the second issuer backend.
+5. Normalize all accepted identities into `Principal`.
+6. Move key access decisions to a local policy evaluator.
+7. Reuse the same pattern in other services manually, without extracting a
+   shared library too early.
+
+## Important Constraint
+
+Do not prematurely extract a shared authorization library or introduce a new
+central authorization server.
+
+Each binary should stay understandable and independently operable. Shared code
+can be reconsidered only after the model is proven stable in more than one
+service.
