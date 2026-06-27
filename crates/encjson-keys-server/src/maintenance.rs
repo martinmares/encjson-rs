@@ -9,10 +9,11 @@ use serde::Serialize;
 use sqlx::PgPool;
 use tracing::info;
 
+use crate::api_error::{api_error, api_server_error};
 use crate::crypto_store::{ENC_PREFIX, encrypt_private_hex};
 use crate::models::{BootstrapImportRequest, BootstrapImportResponse};
 use crate::state::AppState;
-use crate::{STATUS_ACTIVE, STATUS_REVOKED, ensure_auth, is_valid_key_status, server_error};
+use crate::{STATUS_ACTIVE, STATUS_REVOKED, ensure_auth, is_valid_key_status};
 
 pub(crate) async fn bootstrap_key_from_source(
     db: &PgPool,
@@ -108,12 +109,12 @@ pub(crate) async fn reencrypt_keys(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
 
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
 
     let rows = sqlx::query_as::<_, (String, String)>(
@@ -123,7 +124,7 @@ pub(crate) async fn reencrypt_keys(
     .await;
     let rows = match rows {
         Ok(v) => v,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
 
     let mut keys_updated = 0i64;
@@ -133,7 +134,7 @@ pub(crate) async fn reencrypt_keys(
         }
         let encrypted = match encrypt_private_hex(&state.encryption_secret, &private_hex) {
             Ok(v) => v,
-            Err(err) => return server_error(err),
+            Err(err) => return api_server_error(err),
         };
         let _ = sqlx::query("update keys set private_hex = $2 where public_hex = $1")
             .bind(&public_hex)
@@ -150,7 +151,7 @@ pub(crate) async fn reencrypt_keys(
     .await;
     let rows = match rows {
         Ok(v) => v,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
 
     let mut requests_updated = 0i64;
@@ -160,7 +161,7 @@ pub(crate) async fn reencrypt_keys(
         }
         let encrypted = match encrypt_private_hex(&state.encryption_secret, &private_hex) {
             Ok(v) => v,
-            Err(err) => return server_error(err),
+            Err(err) => return api_server_error(err),
         };
         let _ = sqlx::query("update requests set private_hex = $2 where id = $1")
             .bind(id)
@@ -171,7 +172,7 @@ pub(crate) async fn reencrypt_keys(
     }
 
     if let Err(err) = tx.commit().await {
-        return server_error(err);
+        return api_server_error(err);
     }
 
     Json(ReencryptResult {
@@ -191,10 +192,10 @@ pub(crate) async fn bootstrap_import(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
     let Some(source) = state.bootstrap.source_options.as_ref() else {
-        return (StatusCode::BAD_REQUEST, "key source is not configured").into_response();
+        return api_error(StatusCode::BAD_REQUEST, "key source is not configured");
     };
     let status = payload
         .status
@@ -217,7 +218,7 @@ pub(crate) async fn bootstrap_import(
     .await
     {
         Ok(v) => v,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
     Json(imported).into_response()
 }

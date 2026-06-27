@@ -224,9 +224,10 @@ Acceptance criteria:
 
 ### Phase 3: Normalize REST Errors
 
-- [ ] introduce `ApiError`
-- [ ] return JSON errors for REST endpoints
-- [ ] keep UI redirects/errors separate from REST errors
+- [x] introduce `ApiError`
+- [x] return JSON errors for REST endpoints
+- [x] keep UI redirects/errors separate from REST errors
+- [x] add JSON error contract tests
 - [ ] update CLI clients to display better messages
 
 ### Phase 4: Strengthen Audit
@@ -247,5 +248,5 @@ Acceptance criteria:
 
 ## Immediate Next Step
 
-The next coding step should be Phase 3: normalize REST errors to JSON while
-keeping UI redirects/errors separate.
+The next coding step should finish Phase 3 by updating CLI clients to display
+the normalized REST error body.

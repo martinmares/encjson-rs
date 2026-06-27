@@ -9,10 +9,11 @@ use axum::{
 use encjson_core::recipient::{PrivateBundle, PublicBundle};
 use sqlx::{Postgres, QueryBuilder};
 
+use crate::api_error::{api_error, api_server_error};
 use crate::crypto_store::decrypt_private_hex;
 use crate::models::*;
 use crate::state::{AppState, MtlsSpiffeIdentity};
-use crate::{ensure_auth, ensure_auth_spiffe_policy, is_valid_key_status, server_error};
+use crate::{ensure_auth, ensure_auth_spiffe_policy, is_valid_key_status};
 
 pub(crate) async fn list_keys(
     State(state): State<AppState>,
@@ -31,7 +32,7 @@ pub(crate) async fn list_keys(
         query.tenant
     } else if let Some(tenant) = query.tenant {
         if !auth.tenants.contains(&tenant) {
-            return (StatusCode::FORBIDDEN, "tenant not allowed").into_response();
+            return api_error(StatusCode::FORBIDDEN, "tenant not allowed");
         }
         Some(tenant)
     } else {
@@ -44,7 +45,7 @@ pub(crate) async fn list_keys(
         builder.push("tenant = ").push_bind(tenant);
     } else if !auth.is_admin {
         if auth.tenants.is_empty() {
-            return (StatusCode::FORBIDDEN, "no tenant access").into_response();
+            return api_error(StatusCode::FORBIDDEN, "no tenant access");
         }
         builder.push(if has_where { " and " } else { " where " });
         has_where = true;
@@ -73,7 +74,7 @@ pub(crate) async fn list_keys(
     let query = builder.build_query_as::<KeyRow>();
     let rows = match query.fetch_all(&state.db).await {
         Ok(rows) => rows,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
     Json(rows).into_response()
 }
@@ -96,12 +97,12 @@ pub(crate) async fn get_key(
     match row {
         Ok(Some(row)) => {
             if !auth.is_admin && !auth.tenants.contains(&row.tenant) {
-                return (StatusCode::FORBIDDEN, "tenant not allowed").into_response();
+                return api_error(StatusCode::FORBIDDEN, "tenant not allowed");
             }
             Json(row).into_response()
         }
-        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(err) => server_error(err),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "not found"),
+        Err(err) => api_server_error(err),
     }
 }
 
@@ -140,7 +141,7 @@ pub(crate) async fn get_private_key(
             };
 
             if !auth.is_admin && !auth.tenants.contains(&row.tenant) {
-                return (StatusCode::FORBIDDEN, "tenant not allowed").into_response();
+                return api_error(StatusCode::FORBIDDEN, "tenant not allowed");
             }
 
             let limiter_key = format!(
@@ -157,15 +158,15 @@ pub(crate) async fn get_private_key(
                 )
             };
             if !allowed {
-                return (StatusCode::TOO_MANY_REQUESTS, "rate limit").into_response();
+                return api_error(StatusCode::TOO_MANY_REQUESTS, "rate limit");
             }
             let Some(private_hex) = row.private_hex else {
-                return (StatusCode::NOT_FOUND, "private key not available").into_response();
+                return api_error(StatusCode::NOT_FOUND, "private key not available");
             };
             let private_hex = match decrypt_private_hex(&state.encryption_secret, &private_hex) {
                 Ok(v) => v,
                 Err(_) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response();
+                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed");
                 }
             };
             let _ = sqlx::query(
@@ -183,8 +184,8 @@ pub(crate) async fn get_private_key(
             })
             .into_response()
         }
-        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(err) => server_error(err),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "not found"),
+        Err(err) => api_server_error(err),
     }
 }
 
@@ -224,44 +225,41 @@ pub(crate) async fn get_key_bundle(
             };
 
             if !auth.is_admin && !auth.tenants.contains(&row.tenant) {
-                return (StatusCode::FORBIDDEN, "tenant not allowed").into_response();
+                return api_error(StatusCode::FORBIDDEN, "tenant not allowed");
             }
 
             let Some(key_id) = row.key_id.clone() else {
-                return (StatusCode::BAD_REQUEST, "legacy key has no v3 bundle").into_response();
+                return api_error(StatusCode::BAD_REQUEST, "legacy key has no v3 bundle");
             };
             let Some(bundle_version) = row.bundle_version else {
-                return (StatusCode::BAD_REQUEST, "legacy key has no v3 bundle").into_response();
+                return api_error(StatusCode::BAD_REQUEST, "legacy key has no v3 bundle");
             };
             let Some(algorithm) = row.algorithm.clone() else {
-                return (StatusCode::BAD_REQUEST, "legacy key has no v3 bundle").into_response();
+                return api_error(StatusCode::BAD_REQUEST, "legacy key has no v3 bundle");
             };
             let Some(public_bundle_value) = row.public_bundle.clone() else {
-                return (StatusCode::BAD_REQUEST, "public bundle missing").into_response();
+                return api_error(StatusCode::BAD_REQUEST, "public bundle missing");
             };
             let Some(private_bundle_enc) = row.private_bundle.clone() else {
-                return (StatusCode::BAD_REQUEST, "private bundle missing").into_response();
+                return api_error(StatusCode::BAD_REQUEST, "private bundle missing");
             };
             let public_bundle: PublicBundle = match serde_json::from_value(public_bundle_value) {
                 Ok(v) => v,
                 Err(_) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "invalid public bundle")
-                        .into_response();
+                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid public bundle");
                 }
             };
             let private_bundle_json =
                 match decrypt_private_hex(&state.encryption_secret, &private_bundle_enc) {
                     Ok(v) => v,
                     Err(_) => {
-                        return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed")
-                            .into_response();
+                        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed");
                     }
                 };
             let private_bundle: PrivateBundle = match serde_json::from_str(&private_bundle_json) {
                 Ok(v) => v,
                 Err(_) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "invalid private bundle")
-                        .into_response();
+                    return api_error(StatusCode::INTERNAL_SERVER_ERROR, "invalid private bundle");
                 }
             };
 
@@ -279,8 +277,8 @@ pub(crate) async fn get_key_bundle(
             })
             .into_response()
         }
-        Ok(None) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(err) => server_error(err),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "not found"),
+        Err(err) => api_server_error(err),
     }
 }
 
@@ -295,11 +293,11 @@ pub(crate) async fn patch_key(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
     let existing = match sqlx::query_as::<_, KeyRow>(
         "select public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason, created_at, updated_at from keys where public_hex = $1",
@@ -309,15 +307,15 @@ pub(crate) async fn patch_key(
     .await
     {
         Ok(Some(row)) => row,
-        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(err) => return server_error(err),
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not found"),
+        Err(err) => return api_server_error(err),
     };
 
     let tenant = payload.tenant.unwrap_or(existing.tenant);
     if let Some(ref status) = payload.status
         && !is_valid_key_status(status)
     {
-        return (StatusCode::BAD_REQUEST, "invalid status").into_response();
+        return api_error(StatusCode::BAD_REQUEST, "invalid status");
     }
     let status = payload.status.unwrap_or(existing.status);
     let note = payload.note.or(existing.note);
@@ -338,10 +336,10 @@ pub(crate) async fn patch_key(
     match updated {
         Ok(row) => {
             if let Err(err) = tx.commit().await {
-                return server_error(err);
+                return api_server_error(err);
             }
             Json(row).into_response()
         }
-        Err(err) => server_error(err),
+        Err(err) => api_server_error(err),
     }
 }

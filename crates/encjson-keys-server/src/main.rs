@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
+mod api_error;
 mod args;
 mod auth;
 mod crypto_store;

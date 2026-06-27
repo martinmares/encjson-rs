@@ -23,6 +23,7 @@ use tracing::error;
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::ParsedExtension;
 
+use crate::api_error::api_error;
 use crate::state::{AppState, MtlsCfg, MtlsSpiffeIdentity};
 
 #[derive(Debug, Clone)]
@@ -166,29 +167,29 @@ pub(crate) fn ensure_auth_spiffe_policy(
     spiffe_identity: Option<String>,
 ) -> Result<AuthContext, Box<Response>> {
     if !state.mtls_required {
-        return Err(Box::new(
-            (StatusCode::UNAUTHORIZED, "missing authorization").into_response(),
-        ));
+        return Err(Box::new(api_error(
+            StatusCode::UNAUTHORIZED,
+            "missing authorization",
+        )));
     }
     let Some(spiffe_id) = spiffe_identity else {
-        return Err(Box::new(
-            (
-                StatusCode::UNAUTHORIZED,
-                "missing SPIFFE identity from mTLS certificate",
-            )
-                .into_response(),
-        ));
+        return Err(Box::new(api_error(
+            StatusCode::UNAUTHORIZED,
+            "missing SPIFFE identity from mTLS certificate",
+        )));
     };
     if !spiffe_id.starts_with("spiffe://") {
-        return Err(Box::new(
-            (StatusCode::UNAUTHORIZED, "invalid SPIFFE identity").into_response(),
-        ));
+        return Err(Box::new(api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid SPIFFE identity",
+        )));
     }
     let env = header_string(headers, "x-encjson-env");
     let Some(policy) = state.policy.as_ref() else {
-        return Err(Box::new(
-            (StatusCode::FORBIDDEN, "policy file not configured").into_response(),
-        ));
+        return Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "policy file not configured",
+        )));
     };
 
     let decision = evaluate(
@@ -206,9 +207,10 @@ pub(crate) fn ensure_auth_spiffe_policy(
         },
     );
     if !matches!(decision, Decision::Allow) {
-        return Err(Box::new(
-            (StatusCode::FORBIDDEN, "spiffe policy denied").into_response(),
-        ));
+        return Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "spiffe policy denied",
+        )));
     }
 
     Ok(AuthContext {
@@ -242,36 +244,40 @@ pub(crate) fn ensure_auth(
         });
     }
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
-        return Err(Box::new(
-            (StatusCode::UNAUTHORIZED, "missing authorization").into_response(),
-        ));
+        return Err(Box::new(api_error(
+            StatusCode::UNAUTHORIZED,
+            "missing authorization",
+        )));
     };
     let Ok(auth) = value.to_str() else {
-        return Err(Box::new(
-            (StatusCode::UNAUTHORIZED, "invalid authorization").into_response(),
-        ));
+        return Err(Box::new(api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid authorization",
+        )));
     };
     if !auth.starts_with("Bearer ") {
-        return Err(Box::new(
-            (StatusCode::UNAUTHORIZED, "invalid authorization").into_response(),
-        ));
+        return Err(Box::new(api_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid authorization",
+        )));
     }
     let auth = auth.strip_prefix("Bearer ").unwrap_or(auth);
     let header = match decode_header(auth) {
         Ok(header) => header,
         Err(_) => {
-            return Err(Box::new(
-                (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
-            ));
+            return Err(Box::new(api_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid token",
+            )));
         }
     };
     let kid = header
         .kid
-        .ok_or_else(|| Box::new((StatusCode::UNAUTHORIZED, "missing kid").into_response()))?;
+        .ok_or_else(|| Box::new(api_error(StatusCode::UNAUTHORIZED, "missing kid")))?;
     let key = state
         .jwks
         .get(&kid)
-        .ok_or_else(|| Box::new((StatusCode::UNAUTHORIZED, "unknown kid").into_response()))?;
+        .ok_or_else(|| Box::new(api_error(StatusCode::UNAUTHORIZED, "unknown kid")))?;
     let mut validation = Validation::new(header.alg);
     if let Some(issuer) = state.jwt_issuer.as_ref() {
         validation.set_issuer(&[issuer.as_str()]);
@@ -282,14 +288,15 @@ pub(crate) fn ensure_auth(
         validation.validate_aud = false;
     }
     let token = decode::<Claims>(auth, key, &validation)
-        .map_err(|_| Box::new((StatusCode::UNAUTHORIZED, "token invalid").into_response()))?;
+        .map_err(|_| Box::new(api_error(StatusCode::UNAUTHORIZED, "token invalid")))?;
     let groups = token.claims.groups.map(groups_to_vec).unwrap_or_default();
     let is_admin = groups.iter().any(|g| g == "encjson:role:admin");
     let is_scoped = groups.iter().any(|g| g == "encjson:role:scoped");
     if !is_admin && !is_scoped {
-        return Err(Box::new(
-            (StatusCode::FORBIDDEN, "role not allowed").into_response(),
-        ));
+        return Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "role not allowed",
+        )));
     }
     let tenants = groups
         .iter()

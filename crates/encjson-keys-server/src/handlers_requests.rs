@@ -8,12 +8,11 @@ use axum::{
 };
 use serde::Deserialize;
 
+use crate::api_error::{api_error, api_server_error};
 use crate::crypto_store::{decrypt_private_hex, encrypt_private_hex, public_from_private_hex};
 use crate::models::*;
 use crate::state::AppState;
-use crate::{
-    STATUS_ACTIVE, ensure_auth, is_hex_64, is_valid_key_status, server_error, validate_v3_bundles,
-};
+use crate::{STATUS_ACTIVE, ensure_auth, is_hex_64, is_valid_key_status, validate_v3_bundles};
 
 pub(crate) async fn create_request(
     State(state): State<AppState>,
@@ -25,7 +24,7 @@ pub(crate) async fn create_request(
         Err(resp) => return *resp,
     };
     if !auth.is_admin && !auth.is_scoped {
-        return (StatusCode::FORBIDDEN, "role not allowed").into_response();
+        return api_error(StatusCode::FORBIDDEN, "role not allowed");
     }
     let limiter_key = format!(
         "request:{}",
@@ -40,7 +39,7 @@ pub(crate) async fn create_request(
         )
     };
     if !allowed {
-        return (StatusCode::TOO_MANY_REQUESTS, "rate limit").into_response();
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "rate limit");
     }
     let requested_by = headers
         .get("x-user")
@@ -51,25 +50,24 @@ pub(crate) async fn create_request(
     let row = match payload {
         RequestCreate::Legacy(payload) => {
             if !is_hex_64(&payload.public_hex) {
-                return (StatusCode::BAD_REQUEST, "invalid public_hex").into_response();
+                return api_error(StatusCode::BAD_REQUEST, "invalid public_hex");
             }
             if !is_hex_64(&payload.private_hex) {
-                return (StatusCode::BAD_REQUEST, "invalid private_hex").into_response();
+                return api_error(StatusCode::BAD_REQUEST, "invalid private_hex");
             }
             let derived = match public_from_private_hex(payload.private_hex.trim()) {
                 Ok(v) => v,
-                Err(_) => return (StatusCode::BAD_REQUEST, "invalid private_hex").into_response(),
+                Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid private_hex"),
             };
             if derived != payload.public_hex.trim() {
-                return (StatusCode::BAD_REQUEST, "public/private mismatch").into_response();
+                return api_error(StatusCode::BAD_REQUEST, "public/private mismatch");
             }
             let tags = payload.tags.unwrap_or_default();
             let encrypted =
                 match encrypt_private_hex(&state.encryption_secret, payload.private_hex.trim()) {
                     Ok(v) => v,
                     Err(_) => {
-                        return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed")
-                            .into_response();
+                        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed");
                     }
                 };
 
@@ -98,28 +96,27 @@ pub(crate) async fn create_request(
             ) {
                 Ok(v) => v,
                 Err(_) => {
-                    return (StatusCode::BAD_REQUEST, "invalid v3 key bundle").into_response();
+                    return api_error(StatusCode::BAD_REQUEST, "invalid v3 key bundle");
                 }
             };
             let tags = payload.tags.unwrap_or_default();
             let public_bundle_value = match serde_json::to_value(&payload.public_bundle) {
                 Ok(v) => v,
                 Err(_) => {
-                    return (StatusCode::BAD_REQUEST, "invalid public_bundle").into_response();
+                    return api_error(StatusCode::BAD_REQUEST, "invalid public_bundle");
                 }
             };
             let private_bundle_json = match serde_json::to_string(&payload.private_bundle) {
                 Ok(v) => v,
                 Err(_) => {
-                    return (StatusCode::BAD_REQUEST, "invalid private_bundle").into_response();
+                    return api_error(StatusCode::BAD_REQUEST, "invalid private_bundle");
                 }
             };
             let private_bundle_enc =
                 match encrypt_private_hex(&state.encryption_secret, &private_bundle_json) {
                     Ok(v) => v,
                     Err(_) => {
-                        return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed")
-                            .into_response();
+                        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed");
                     }
                 };
 
@@ -146,7 +143,7 @@ pub(crate) async fn create_request(
 
     match row {
         Ok(row) => Json(row).into_response(),
-        Err(err) => server_error(err),
+        Err(err) => api_server_error(err),
     }
 }
 
@@ -165,7 +162,7 @@ pub(crate) async fn list_requests(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
     let rows = if let Some(status) = query.status {
         sqlx::query_as::<_, RequestRow>(
@@ -188,7 +185,7 @@ pub(crate) async fn list_requests(
 
     match rows {
         Ok(rows) => Json(rows).into_response(),
-        Err(err) => server_error(err),
+        Err(err) => api_server_error(err),
     }
 }
 
@@ -203,11 +200,11 @@ pub(crate) async fn update_request(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
     let req = match sqlx::query_as::<_, RequestRow>(
         "select id, public_hex, key_id, bundle_version, algorithm, public_bundle, tenant, note, tags, status, requested_by, requested_at, \
@@ -219,11 +216,11 @@ pub(crate) async fn update_request(
     .await
     {
         Ok(Some(row)) => row,
-        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(err) => return server_error(err),
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not found"),
+        Err(err) => return api_server_error(err),
     };
     if req.status != "pending" {
-        return (StatusCode::CONFLICT, "request not pending").into_response();
+        return api_error(StatusCode::CONFLICT, "request not pending");
     }
     let tenant = payload.tenant.unwrap_or(req.tenant.clone());
     let note = payload.note.unwrap_or(req.note.clone());
@@ -244,11 +241,11 @@ pub(crate) async fn update_request(
     match updated {
         Ok(row) => {
             if let Err(err) = tx.commit().await {
-                return server_error(err);
+                return api_server_error(err);
             }
             Json(row).into_response()
         }
-        Err(err) => server_error(err),
+        Err(err) => api_server_error(err),
     }
 }
 
@@ -263,7 +260,7 @@ pub(crate) async fn approve_request(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
     let decided_by = headers
         .get("x-user")
@@ -273,7 +270,7 @@ pub(crate) async fn approve_request(
 
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
     let req = match sqlx::query_as::<_, RequestRowSecret>(
         "select public_hex, private_hex, key_id, bundle_version, algorithm, public_bundle, private_bundle, tenant, note, tags from requests where id = $1",
@@ -283,13 +280,13 @@ pub(crate) async fn approve_request(
     .await
     {
         Ok(Some(row)) => row,
-        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(err) => return server_error(err),
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "not found"),
+        Err(err) => return api_server_error(err),
     };
     let tenant = payload.tenant.unwrap_or(req.tenant.clone());
     let status = payload.status.unwrap_or_else(|| STATUS_ACTIVE.to_string());
     if !is_valid_key_status(&status) {
-        return (StatusCode::BAD_REQUEST, "invalid status").into_response();
+        return api_error(StatusCode::BAD_REQUEST, "invalid status");
     }
     let note = payload.note.unwrap_or(req.note.clone());
     let tags = payload.tags.unwrap_or(req.tags.clone());
@@ -297,18 +294,18 @@ pub(crate) async fn approve_request(
     if let Some(private_hex) = req.private_hex.clone() {
         let decrypted = match decrypt_private_hex(&state.encryption_secret, private_hex.trim()) {
             Ok(v) => v,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed").into_response(),
+            Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "decrypt failed"),
         };
         let derived = match public_from_private_hex(decrypted.trim()) {
             Ok(v) => v,
-            Err(_) => return (StatusCode::BAD_REQUEST, "invalid private_hex").into_response(),
+            Err(_) => return api_error(StatusCode::BAD_REQUEST, "invalid private_hex"),
         };
         if derived != req.public_hex {
-            return (StatusCode::BAD_REQUEST, "public/private mismatch").into_response();
+            return api_error(StatusCode::BAD_REQUEST, "public/private mismatch");
         }
         let encrypted_key = match encrypt_private_hex(&state.encryption_secret, decrypted.trim()) {
             Ok(v) => v,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed").into_response(),
+            Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "encrypt failed"),
         };
 
         let _ = sqlx::query(
@@ -333,19 +330,19 @@ pub(crate) async fn approve_request(
         .await;
     } else {
         let Some(key_id) = req.key_id.clone() else {
-            return (StatusCode::BAD_REQUEST, "v3 request missing key_id").into_response();
+            return api_error(StatusCode::BAD_REQUEST, "v3 request missing key_id");
         };
         let Some(bundle_version) = req.bundle_version else {
-            return (StatusCode::BAD_REQUEST, "v3 request missing version").into_response();
+            return api_error(StatusCode::BAD_REQUEST, "v3 request missing version");
         };
         let Some(algorithm) = req.algorithm.clone() else {
-            return (StatusCode::BAD_REQUEST, "v3 request missing algorithm").into_response();
+            return api_error(StatusCode::BAD_REQUEST, "v3 request missing algorithm");
         };
         let Some(public_bundle) = req.public_bundle.clone() else {
-            return (StatusCode::BAD_REQUEST, "v3 request missing public_bundle").into_response();
+            return api_error(StatusCode::BAD_REQUEST, "v3 request missing public_bundle");
         };
         let Some(private_bundle) = req.private_bundle.clone() else {
-            return (StatusCode::BAD_REQUEST, "v3 request missing private_bundle").into_response();
+            return api_error(StatusCode::BAD_REQUEST, "v3 request missing private_bundle");
         };
 
         let _ = sqlx::query(
@@ -393,11 +390,11 @@ pub(crate) async fn approve_request(
     match updated {
         Ok(row) => {
             if let Err(err) = tx.commit().await {
-                return server_error(err);
+                return api_server_error(err);
             }
             Json(row).into_response()
         }
-        Err(err) => server_error(err),
+        Err(err) => api_server_error(err),
     }
 }
 
@@ -412,7 +409,7 @@ pub(crate) async fn reject_request(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
     let decided_by = headers
         .get("x-user")
@@ -434,6 +431,6 @@ pub(crate) async fn reject_request(
 
     match row {
         Ok(row) => Json(row).into_response(),
-        Err(err) => server_error(err),
+        Err(err) => api_server_error(err),
     }
 }

@@ -5,9 +5,10 @@ use axum::{
     response::IntoResponse,
 };
 
+use crate::api_error::{api_error, api_server_error};
 use crate::models::{TenantCreate, TenantRename, TenantRow};
 use crate::state::AppState;
-use crate::{STATUS_ACTIVE, STATUS_REVOKED, ensure_auth, server_error};
+use crate::{STATUS_ACTIVE, STATUS_REVOKED, ensure_auth};
 
 pub(crate) async fn list_tenants(
     State(state): State<AppState>,
@@ -18,7 +19,7 @@ pub(crate) async fn list_tenants(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
     let rows =
         sqlx::query_as::<_, TenantRow>("select id, name, created_at from tenants order by name")
@@ -26,7 +27,7 @@ pub(crate) async fn list_tenants(
             .await;
     match rows {
         Ok(rows) => Json(rows).into_response(),
-        Err(err) => server_error(err),
+        Err(err) => api_server_error(err),
     }
 }
 
@@ -40,11 +41,11 @@ pub(crate) async fn create_tenant(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
     let name = payload.name.trim();
     if name.is_empty() {
-        return (StatusCode::BAD_REQUEST, "name required").into_response();
+        return api_error(StatusCode::BAD_REQUEST, "name required");
     }
     let row = sqlx::query_as::<_, TenantRow>(
         "insert into tenants (name) values ($1) returning id, name, created_at",
@@ -54,7 +55,7 @@ pub(crate) async fn create_tenant(
     .await;
     match row {
         Ok(row) => Json(row).into_response(),
-        Err(err) => server_error(err),
+        Err(err) => api_server_error(err),
     }
 }
 
@@ -69,16 +70,16 @@ pub(crate) async fn rename_tenant(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
     let new_name = payload.name.trim();
     if new_name.is_empty() {
-        return (StatusCode::BAD_REQUEST, "name required").into_response();
+        return api_error(StatusCode::BAD_REQUEST, "name required");
     }
 
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
 
     let row = match sqlx::query_as::<_, TenantRow>(
@@ -90,8 +91,8 @@ pub(crate) async fn rename_tenant(
     .await
     {
         Ok(Some(row)) => row,
-        Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
-        Err(err) => return server_error(err),
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "tenant not found"),
+        Err(err) => return api_server_error(err),
     };
 
     let _ = sqlx::query("update keys set tenant = $2 where tenant = $1")
@@ -106,7 +107,7 @@ pub(crate) async fn rename_tenant(
         .await;
 
     if let Err(err) = tx.commit().await {
-        return server_error(err);
+        return api_server_error(err);
     }
     Json(row).into_response()
 }
@@ -121,12 +122,12 @@ pub(crate) async fn delete_tenant(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
 
     let mut tx = match state.db.begin().await {
         Ok(tx) => tx,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
 
     let tenant = match sqlx::query_scalar::<_, i64>("select count(*) from tenants where name = $1")
@@ -135,10 +136,10 @@ pub(crate) async fn delete_tenant(
         .await
     {
         Ok(count) => count,
-        Err(err) => return server_error(err),
+        Err(err) => return api_server_error(err),
     };
     if tenant == 0 {
-        return (StatusCode::NOT_FOUND, "tenant not found").into_response();
+        return api_error(StatusCode::NOT_FOUND, "tenant not found");
     }
 
     let keys_count =
@@ -148,10 +149,10 @@ pub(crate) async fn delete_tenant(
             .await
         {
             Ok(count) => count,
-            Err(err) => return server_error(err),
+            Err(err) => return api_server_error(err),
         };
     if keys_count > 0 {
-        return (StatusCode::CONFLICT, "tenant has associated keys").into_response();
+        return api_error(StatusCode::CONFLICT, "tenant has associated keys");
     }
     let requests_count =
         match sqlx::query_scalar::<_, i64>("select count(*) from requests where tenant = $1")
@@ -160,10 +161,10 @@ pub(crate) async fn delete_tenant(
             .await
         {
             Ok(count) => count,
-            Err(err) => return server_error(err),
+            Err(err) => return api_server_error(err),
         };
     if requests_count > 0 {
-        return (StatusCode::CONFLICT, "tenant has associated requests").into_response();
+        return api_error(StatusCode::CONFLICT, "tenant has associated requests");
     }
 
     let delete = sqlx::query("delete from tenants where name = $1")
@@ -171,10 +172,10 @@ pub(crate) async fn delete_tenant(
         .execute(&mut *tx)
         .await;
     if let Err(err) = delete {
-        return server_error(err);
+        return api_server_error(err);
     }
     if let Err(err) = tx.commit().await {
-        return server_error(err);
+        return api_server_error(err);
     }
 
     StatusCode::NO_CONTENT.into_response()
@@ -189,7 +190,7 @@ pub(crate) async fn list_statuses(
         Err(resp) => return *resp,
     };
     if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
+        return api_error(StatusCode::FORBIDDEN, "admin required");
     }
     Json(vec![STATUS_ACTIVE, STATUS_REVOKED]).into_response()
 }
