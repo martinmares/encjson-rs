@@ -1,20 +1,16 @@
 use std::net::SocketAddr;
 
 use axum::{
-    Json, Router,
-    extract::State,
-    http::{HeaderMap, StatusCode},
+    Router,
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, patch, post},
 };
 use clap::Parser;
 use encjson_core::key_sources::{
-    ConjurConfig, KeySourceOptions, RemoteMtlsConfig, VaultConfig, load_from_source,
-    require_policy_context,
+    ConjurConfig, KeySourceOptions, RemoteMtlsConfig, VaultConfig, require_policy_context,
 };
 use encjson_core::policy_engine::{Policy, Profile, validate_for_profile};
-use encjson_core::recipient::{PrivateBundle, PublicBundle, compute_key_id};
-use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +23,8 @@ mod crypto_store;
 mod handlers_keys;
 mod handlers_requests;
 mod handlers_tenants;
+mod key_validation;
+mod maintenance;
 mod models;
 mod rate_limit;
 mod state;
@@ -36,13 +34,13 @@ mod ui_state;
 
 use args::{Args, KeySourceCli};
 use auth::{ensure_auth, ensure_auth_spiffe_policy, get_me, load_jwks, serve_mtls};
-use crypto_store::{ENC_PREFIX, encrypt_private_hex};
 use handlers_keys::{get_key, get_key_bundle, get_private_key, list_keys, patch_key};
 use handlers_requests::{
     approve_request, create_request, list_requests, reject_request, update_request,
 };
 use handlers_tenants::{create_tenant, delete_tenant, list_statuses, list_tenants, rename_tenant};
-use models::*;
+use key_validation::{is_hex_64, validate_v3_bundles};
+use maintenance::{bootstrap_import, bootstrap_key_from_source, reencrypt_keys};
 use rate_limit::{RateLimitCfg, RateLimiter};
 use state::{AppState, BootstrapCfg, MtlsCfg};
 use ui_handlers::{
@@ -141,85 +139,6 @@ fn build_key_source_options(args: &Args) -> anyhow::Result<Option<KeySourceOptio
         vault,
         conjur,
     }))
-}
-
-async fn bootstrap_key_from_source(
-    db: &PgPool,
-    encryption_secret: &str,
-    options: &KeySourceOptions,
-    tenant: &str,
-    env: &str,
-    status: &str,
-    note: &str,
-) -> anyhow::Result<BootstrapImportResponse> {
-    if !is_valid_key_status(status.trim()) {
-        return Err(anyhow::anyhow!(
-            "status must be one of: {STATUS_ACTIVE}, {STATUS_REVOKED}"
-        ));
-    }
-    let tenant = tenant.trim();
-    let env = env.trim();
-    if tenant.is_empty() {
-        return Err(anyhow::anyhow!("tenant is required"));
-    }
-    if env.is_empty() {
-        return Err(anyhow::anyhow!("env is required"));
-    }
-
-    let loaded = load_from_source(options).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let encrypted = encrypt_private_hex(encryption_secret, loaded.private_hex.trim())?;
-    let env_tag = format!("env:{env}");
-    let source_tag = format!("source:{}", options.kind.as_str());
-    let tags = vec!["bootstrap".to_string(), source_tag, env_tag];
-    let status = status.trim().to_string();
-    let note = note.trim().to_string();
-
-    let mut tx = db.begin().await?;
-    sqlx::query("insert into tenants (name) values ($1) on conflict (name) do nothing")
-        .bind(tenant)
-        .execute(&mut *tx)
-        .await?;
-
-    sqlx::query(
-        "insert into keys (public_hex, private_hex, tenant, status, note, tags, legacy_mode, pair_consistent, legacy_reason) \
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
-         on conflict (public_hex) do update \
-         set private_hex = excluded.private_hex, \
-             tenant = excluded.tenant, \
-             status = excluded.status, \
-             note = excluded.note, \
-             tags = excluded.tags, \
-             legacy_mode = excluded.legacy_mode, \
-             pair_consistent = excluded.pair_consistent, \
-             legacy_reason = excluded.legacy_reason, \
-             updated_at = now()",
-    )
-    .bind(loaded.public_hex.trim())
-    .bind(encrypted)
-    .bind(tenant)
-    .bind(&status)
-    .bind(&note)
-    .bind(&tags)
-    .bind(false)
-    .bind(true)
-    .bind(None::<String>)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    info!(
-        "bootstrap key imported from source={} for tenant={} env={}",
-        options.kind.as_str(),
-        tenant,
-        env
-    );
-    Ok(BootstrapImportResponse {
-        public_hex: loaded.public_hex,
-        tenant: tenant.to_string(),
-        env: env.to_string(),
-        status,
-        note,
-        tags,
-    })
 }
 
 #[tokio::main]
@@ -428,172 +347,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Serialize)]
-struct ReencryptResult {
-    keys_updated: i64,
-    requests_updated: i64,
-}
-
-async fn reencrypt_keys(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
-        Ok(auth) => auth,
-        Err(resp) => return *resp,
-    };
-    if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
-    }
-
-    let mut tx = match state.db.begin().await {
-        Ok(tx) => tx,
-        Err(err) => return server_error(err),
-    };
-
-    let rows = sqlx::query_as::<_, (String, String)>(
-        "select public_hex, private_hex from keys where private_hex is not null",
-    )
-    .fetch_all(&mut *tx)
-    .await;
-    let rows = match rows {
-        Ok(v) => v,
-        Err(err) => return server_error(err),
-    };
-
-    let mut keys_updated = 0i64;
-    for (public_hex, private_hex) in rows {
-        if private_hex.starts_with(ENC_PREFIX) {
-            continue;
-        }
-        let encrypted = match encrypt_private_hex(&state.encryption_secret, &private_hex) {
-            Ok(v) => v,
-            Err(err) => return server_error(err),
-        };
-        let _ = sqlx::query("update keys set private_hex = $2 where public_hex = $1")
-            .bind(&public_hex)
-            .bind(encrypted)
-            .execute(&mut *tx)
-            .await;
-        keys_updated += 1;
-    }
-
-    let rows = sqlx::query_as::<_, (i64, String)>(
-        "select id, private_hex from requests where private_hex is not null",
-    )
-    .fetch_all(&mut *tx)
-    .await;
-    let rows = match rows {
-        Ok(v) => v,
-        Err(err) => return server_error(err),
-    };
-
-    let mut requests_updated = 0i64;
-    for (id, private_hex) in rows {
-        if private_hex.starts_with(ENC_PREFIX) {
-            continue;
-        }
-        let encrypted = match encrypt_private_hex(&state.encryption_secret, &private_hex) {
-            Ok(v) => v,
-            Err(err) => return server_error(err),
-        };
-        let _ = sqlx::query("update requests set private_hex = $2 where id = $1")
-            .bind(id)
-            .bind(encrypted)
-            .execute(&mut *tx)
-            .await;
-        requests_updated += 1;
-    }
-
-    if let Err(err) = tx.commit().await {
-        return server_error(err);
-    }
-
-    Json(ReencryptResult {
-        keys_updated,
-        requests_updated,
-    })
-    .into_response()
-}
-
-async fn bootstrap_import(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<BootstrapImportRequest>,
-) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
-        Ok(auth) => auth,
-        Err(resp) => return *resp,
-    };
-    if !auth.is_admin {
-        return (StatusCode::FORBIDDEN, "admin required").into_response();
-    }
-    let Some(source) = state.bootstrap.source_options.as_ref() else {
-        return (StatusCode::BAD_REQUEST, "key source is not configured").into_response();
-    };
-    let status = payload
-        .status
-        .as_deref()
-        .unwrap_or(state.bootstrap.default_status.as_str());
-    let note = payload
-        .note
-        .as_deref()
-        .unwrap_or(state.bootstrap.default_note.as_str());
-
-    let imported = match bootstrap_key_from_source(
-        &state.db,
-        &state.encryption_secret,
-        source,
-        payload.tenant.trim(),
-        payload.env_name.trim(),
-        status,
-        note,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(err) => return server_error(err),
-    };
-    Json(imported).into_response()
-}
-
-pub(crate) fn is_hex_64(value: &str) -> bool {
-    value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn extract_x25519_public_hex(bundle: &PublicBundle) -> anyhow::Result<String> {
-    bundle
-        .components
-        .iter()
-        .find(|component| component.role == "kex" && component.algorithm == "x25519")
-        .map(|component| component.public.clone())
-        .filter(|value| is_hex_64(value))
-        .ok_or_else(|| anyhow::anyhow!("public_bundle is missing x25519 public component"))
-}
-
-pub(crate) fn validate_v3_bundles(
-    key_id: &str,
-    version: u32,
-    algorithm: &str,
-    public_bundle: &PublicBundle,
-    private_bundle: &PrivateBundle,
-) -> anyhow::Result<String> {
-    if version != 3 {
-        return Err(anyhow::anyhow!("version must be 3"));
-    }
-    if public_bundle.version != 3 || private_bundle.version != 3 {
-        return Err(anyhow::anyhow!("bundle version must be 3"));
-    }
-    if public_bundle.key_id != key_id || private_bundle.key_id != key_id {
-        return Err(anyhow::anyhow!("bundle key_id mismatch"));
-    }
-    if public_bundle.algorithm != algorithm || private_bundle.algorithm != algorithm {
-        return Err(anyhow::anyhow!("bundle algorithm mismatch"));
-    }
-    let computed = compute_key_id(public_bundle)?;
-    if computed != key_id {
-        return Err(anyhow::anyhow!("key_id does not match public_bundle"));
-    }
-    extract_x25519_public_hex(public_bundle)
-}
-
 pub(crate) fn server_error(err: impl std::fmt::Display) -> axum::response::Response {
     error!("server error: {}", err);
     (StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response()
@@ -602,10 +355,20 @@ pub(crate) fn server_error(err: impl std::fmt::Display) -> axum::response::Respo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Json;
     use axum::body::to_bytes;
+    use axum::extract::{Path, State};
+    use axum::http::HeaderMap;
     use encjson_core::crypto::{generate_key_pair, generate_v3_key_bundle};
+    use encjson_core::key_sources::KeySourceKind;
+    use encjson_core::recipient::PrivateBundle;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::crypto_store::decrypt_private_hex;
+    use crate::models::{
+        KeyBundleResponse, RequestApprove, RequestCreate, RequestCreateV3, RequestRow,
+    };
 
     fn unique_suffix() -> String {
         let nanos = SystemTime::now()

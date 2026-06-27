@@ -108,18 +108,12 @@ Current key statuses:
 
 ### 1. Server Binary Does Too Much
 
-`crates/encjson-keys-server/src/main.rs` currently contains:
+`crates/encjson-keys-server/src/main.rs` used to contain CLI/env parsing,
+DB startup, auth/JWT/mTLS/SPIFFE policy, REST handlers, built-in UI handlers,
+OIDC UI login, crypto storage helpers, and tests.
 
-- CLI/env parsing
-- DB migrations/bootstrap
-- auth/JWT/mTLS/SPIFFE policy
-- REST API handlers
-- built-in HTML UI handlers
-- OIDC UI login
-- crypto storage helpers
-- tests
-
-This is workable short-term, but it makes every change risky.
+The first split is now done. `main.rs` is kept as the startup/router wiring
+surface, while domain areas live in focused modules.
 
 ### 2. Built-In UI Duplicates Admin Surfaces
 
@@ -205,23 +199,28 @@ Needed later:
 
 Refactor `crates/encjson-keys-server/src/main.rs` into modules:
 
-- `args.rs`
-- `state.rs`
-- `auth.rs`
-- `crypto_store.rs`
-- `routes/me.rs`
-- `routes/keys.rs`
-- `routes/requests.rs`
-- `routes/tenants.rs`
-- `routes/bootstrap.rs`
-- `routes/maintenance.rs`
-- `ui.rs` only if built-in UI stays
+- [x] `args.rs`
+- [x] `state.rs`
+- [x] `auth.rs`
+- [x] `crypto_store.rs`
+- [x] `models.rs`
+- [x] `rate_limit.rs`
+- [x] `key_validation.rs`
+- [x] `handlers_keys.rs`
+- [x] `handlers_requests.rs`
+- [x] `handlers_tenants.rs`
+- [x] `maintenance.rs`
+- [x] `ui_handlers.rs`
+- [x] `ui_html.rs`
+- [x] `ui_state.rs`
 
 Acceptance criteria:
 
-- route handlers remain behaviorally unchanged
-- `cargo test --workspace` passes
-- `cargo clippy --workspace --all-targets --all-features` passes
+- [x] route handlers remain behaviorally unchanged
+- [x] `cargo test -p encjson-keys-server` passes
+- [x] `cargo clippy -p encjson-keys-server --all-targets` passes
+- [x] `cargo test --workspace` passes
+- [x] `cargo clippy --workspace --all-targets --all-features` passes
 
 ### Phase 3: Normalize REST Errors
 
@@ -248,6 +247,5 @@ Acceptance criteria:
 
 ## Immediate Next Step
 
-The next coding step should be Phase 2: split `main.rs` into modules without
-changing behavior.
-
+The next coding step should be Phase 3: normalize REST errors to JSON while
+keeping UI redirects/errors separate.
