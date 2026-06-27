@@ -26,10 +26,6 @@ pub(crate) struct Args {
     pub(crate) keys_kube_sa_discovery_url: Option<String>,
     #[arg(long, env = "ENCJSON_KEYS_KUBE_SA_AUDIENCE")]
     pub(crate) keys_kube_sa_audience: Option<String>,
-    #[arg(long, env = "ENCJSON_KEYS_MTLS_MODE")]
-    pub(crate) keys_mtls_mode: Option<String>,
-    #[arg(long, env = "ENCJSON_KEYS_POLICY_FILE")]
-    pub(crate) keys_policy_file: Option<String>,
     #[arg(long, env = "ENCJSON_KEYS_AUTHZ_FILE")]
     pub(crate) keys_authz_file: Option<String>,
     #[arg(long, env = "ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE")]
@@ -48,12 +44,6 @@ pub(crate) struct Args {
     pub(crate) keys_ui_base_url: Option<String>,
     #[arg(long, env = "ENCJSON_KEYS_UI_COOKIE_SECURE")]
     pub(crate) keys_ui_cookie_secure: Option<bool>,
-    #[arg(long, env = "ENCJSON_KEYS_TLS_CERT_FILE")]
-    pub(crate) keys_tls_cert_file: Option<String>,
-    #[arg(long, env = "ENCJSON_KEYS_TLS_KEY_FILE")]
-    pub(crate) keys_tls_key_file: Option<String>,
-    #[arg(long, env = "ENCJSON_KEYS_TLS_CLIENT_CA_FILE")]
-    pub(crate) keys_tls_client_ca_file: Option<String>,
     #[arg(
         long,
         env = "ENCJSON_KEYS_SERVER_SCOPE_REQUIRED",

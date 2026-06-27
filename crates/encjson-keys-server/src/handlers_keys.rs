@@ -12,8 +12,8 @@ use sqlx::{Postgres, QueryBuilder};
 use crate::api_error::{api_error, api_server_error};
 use crate::crypto_store::decrypt_private_hex;
 use crate::models::*;
-use crate::state::{AppState, MtlsSpiffeIdentity};
-use crate::{ensure_auth, ensure_auth_spiffe_policy, is_valid_key_status};
+use crate::state::AppState;
+use crate::{ensure_auth, is_valid_key_status};
 
 pub(crate) async fn list_keys(
     State(state): State<AppState>,
@@ -110,7 +110,6 @@ pub(crate) async fn get_private_key(
     State(state): State<AppState>,
     Path(public_hex): Path<String>,
     headers: HeaderMap,
-    mtls_spiffe: Option<axum::Extension<MtlsSpiffeIdentity>>,
 ) -> impl IntoResponse {
     let row = sqlx::query_as::<_, KeyPrivateRow>(
         "select public_hex, tenant, private_hex from keys where public_hex = $1",
@@ -121,23 +120,9 @@ pub(crate) async fn get_private_key(
 
     match row {
         Ok(Some(row)) => {
-            let auth = if headers.contains_key(axum::http::header::AUTHORIZATION) {
-                match ensure_auth(&state, &headers) {
-                    Ok(auth) => auth,
-                    Err(resp) => return *resp,
-                }
-            } else {
-                let spiffe_id = mtls_spiffe.map(|x| x.0.spiffe_id);
-                match ensure_auth_spiffe_policy(
-                    &state,
-                    &headers,
-                    "keys.private.read",
-                    &row.tenant,
-                    spiffe_id,
-                ) {
-                    Ok(auth) => auth,
-                    Err(resp) => return *resp,
-                }
+            let auth = match ensure_auth(&state, &headers) {
+                Ok(auth) => auth,
+                Err(resp) => return *resp,
             };
 
             if !auth.is_admin && !auth.tenants.contains(&row.tenant) {
@@ -193,7 +178,6 @@ pub(crate) async fn get_key_bundle(
     State(state): State<AppState>,
     Path(key_id): Path<String>,
     headers: HeaderMap,
-    mtls_spiffe: Option<axum::Extension<MtlsSpiffeIdentity>>,
 ) -> impl IntoResponse {
     let row = sqlx::query_as::<_, KeyBundleRow>(
         "select public_hex, key_id, bundle_version, algorithm, public_bundle, private_bundle, tenant, status, note, tags \
@@ -205,23 +189,9 @@ pub(crate) async fn get_key_bundle(
 
     match row {
         Ok(Some(row)) => {
-            let auth = if headers.contains_key(axum::http::header::AUTHORIZATION) {
-                match ensure_auth(&state, &headers) {
-                    Ok(auth) => auth,
-                    Err(resp) => return *resp,
-                }
-            } else {
-                let spiffe_id = mtls_spiffe.map(|x| x.0.spiffe_id);
-                match ensure_auth_spiffe_policy(
-                    &state,
-                    &headers,
-                    "keys.private.read",
-                    &row.tenant,
-                    spiffe_id,
-                ) {
-                    Ok(auth) => auth,
-                    Err(resp) => return *resp,
-                }
+            let auth = match ensure_auth(&state, &headers) {
+                Ok(auth) => auth,
+                Err(resp) => return *resp,
             };
 
             if !auth.is_admin && !auth.tenants.contains(&row.tenant) {

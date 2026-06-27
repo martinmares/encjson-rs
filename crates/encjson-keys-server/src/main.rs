@@ -10,7 +10,6 @@ use clap::Parser;
 use encjson_core::key_sources::{
     ConjurConfig, KeySourceOptions, RemoteMtlsConfig, VaultConfig, require_policy_context,
 };
-use encjson_core::policy_engine::{Policy, Profile, validate_for_profile};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,9 +34,7 @@ mod ui_html;
 mod ui_state;
 
 use args::{Args, KeySourceCli};
-use auth::{
-    discover_jwks_uri, ensure_auth, ensure_auth_spiffe_policy, get_me, load_jwks, serve_mtls,
-};
+use auth::{discover_jwks_uri, ensure_auth, get_me, load_jwks};
 use authz::BearerAuthzPolicy;
 use handlers_keys::{get_key, get_key_bundle, get_private_key, list_keys, patch_key};
 use handlers_requests::{
@@ -49,7 +46,6 @@ use maintenance::{bootstrap_import, bootstrap_key_from_source, reencrypt_keys};
 use rate_limit::{RateLimitCfg, RateLimiter};
 use state::{
     AppState, AuthIssuer, AuthIssuerKind, BootstrapCfg, ISSUER_KUBE_SA_JWT, ISSUER_SIMPLE_IDM_JWT,
-    MtlsCfg,
 };
 use ui_handlers::{
     ui_callback, ui_index, ui_key_detail, ui_key_edit, ui_keys, ui_keys_list, ui_login, ui_logout,
@@ -185,14 +181,6 @@ async fn main() -> anyhow::Result<()> {
     let jwt_issuer = args.keys_jwt_issuer.clone();
     let jwks_url = args.keys_jwks_url.clone();
     let jwt_audience = args.keys_jwt_audience.clone();
-    let mtls_required = args
-        .keys_mtls_mode
-        .as_deref()
-        .map(|v| v.eq_ignore_ascii_case("required"))
-        .unwrap_or(false);
-    let tls_cert_file = args.keys_tls_cert_file.clone();
-    let tls_key_file = args.keys_tls_key_file.clone();
-    let tls_client_ca_file = args.keys_tls_client_ca_file.clone();
     let key_source_options = build_key_source_options(&args)?;
 
     let db = PgPool::connect(&database_url).await?;
@@ -288,29 +276,6 @@ async fn main() -> anyhow::Result<()> {
         Vec::new()
     };
 
-    let policy = match args.keys_policy_file {
-        Some(path) if !path.trim().is_empty() => {
-            let parsed = Policy::from_file(std::path::Path::new(&path))
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let violations = validate_for_profile(&parsed, Profile::EncjsonKeys);
-            if !violations.is_empty() {
-                let messages = violations
-                    .iter()
-                    .map(|v| match &v.policy_id {
-                        Some(id) => format!("policy '{id}': {}", v.message),
-                        None => v.message.clone(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                return Err(anyhow::anyhow!(
-                    "policy profile validation failed for encjson-keys: {messages}"
-                ));
-            }
-            info!("loaded policy file {}", path);
-            Some(parsed)
-        }
-        _ => None,
-    };
     let bearer_authz = match args.keys_authz_file {
         Some(path) if !path.trim().is_empty() => {
             let parsed = BearerAuthzPolicy::from_file(std::path::Path::new(&path))
@@ -341,9 +306,7 @@ async fn main() -> anyhow::Result<()> {
         },
         ui_states: Arc::new(Mutex::new(HashMap::new())),
         ui_sessions: Arc::new(Mutex::new(HashMap::new())),
-        policy,
         bearer_authz,
-        mtls_required,
         bootstrap: BootstrapCfg {
             source_options: key_source_options,
             default_status: args.keys_bootstrap_status.clone(),
@@ -396,29 +359,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = app.with_state::<()>(state.clone());
     info!("listening on {}", addr);
-    if state.mtls_required {
-        let cert_path = tls_cert_file.ok_or_else(|| {
-            anyhow::anyhow!("ENCJSON_KEYS_TLS_CERT_FILE is required in mTLS mode")
-        })?;
-        let key_path = tls_key_file
-            .ok_or_else(|| anyhow::anyhow!("ENCJSON_KEYS_TLS_KEY_FILE is required in mTLS mode"))?;
-        let client_ca_path = tls_client_ca_file.ok_or_else(|| {
-            anyhow::anyhow!("ENCJSON_KEYS_TLS_CLIENT_CA_FILE is required in mTLS mode")
-        })?;
-        serve_mtls(
-            addr,
-            app,
-            MtlsCfg {
-                cert_path,
-                key_path,
-                client_ca_path,
-            },
-        )
-        .await?;
-    } else {
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app).await?;
-    }
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
     Ok(())
 }
 
@@ -474,9 +416,7 @@ mod tests {
             },
             ui_states: Arc::new(Mutex::new(HashMap::new())),
             ui_sessions: Arc::new(Mutex::new(HashMap::new())),
-            policy: None,
             bearer_authz: None,
-            mtls_required: false,
             bootstrap: BootstrapCfg {
                 source_options: None,
                 default_status: STATUS_ACTIVE.to_string(),
@@ -713,7 +653,6 @@ mod tests {
             State(state.clone()),
             Path(bundle.key_id.clone()),
             HeaderMap::new(),
-            None,
         )
         .await
         .into_response();

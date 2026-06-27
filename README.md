@@ -232,68 +232,16 @@ authz:
         - o2
 ```
 
-Legacy true mTLS mode (client cert required, not the target architecture):
-
-```bash
-export ENCJSON_KEYS_MTLS_MODE=required
-export ENCJSON_KEYS_TLS_CERT_FILE=/etc/tls/tls.crt
-export ENCJSON_KEYS_TLS_KEY_FILE=/etc/tls/tls.key
-export ENCJSON_KEYS_TLS_CLIENT_CA_FILE=/etc/tls/ca.crt
-```
-
-Optional SPIFFE policy authorization:
-
-```bash
-export ENCJSON_KEYS_POLICY_FILE=/etc/encjson/policy.yaml
-```
-
-Policy loading/validation is handled by `encjson-core::policy_engine`
-with profile `EncjsonKeys`.
-
-Example `policy.yaml`:
-
-```yaml
-authz:
-  default: deny
-  policies:
-    - id: address-mgmt-read-test
-      principal:
-        spiffe_id: "spiffe://cluster.local/o2/address-management/api"
-      allow:
-        - action: "keys.private.read"
-          resource:
-            tenant: "tsm"
-            env: ["test"]
-    - id: admin-all
-      principal:
-        spiffe_id: "spiffe://cluster.local/o2/platform/admin"
-      allow:
-        - action: "*"
-          resource: "*"
-```
-
-When `Authorization` header is missing, endpoint `GET /api/v1/keys/{public_hex}/private`
-can authorize via SPIFFE policy.
-
-- In true mTLS mode (`ENCJSON_KEYS_MTLS_MODE=required`), SPIFFE identity is extracted from
-  client certificate URI SAN.
-- `x-spiffe-id` header is not accepted.
-- optional `x-encjson-env: test`
-- If `ENCJSON_KEYS_POLICY_FILE` is configured but invalid for profile `EncjsonKeys`,
-  server startup fails (fail-closed).
-
 ## Keys Server Runtime Modes
 
 `encjson-keys-server` supports both CLI arguments and environment variables (same names via `clap` `env = ...` mapping).
 
 ### Important: Single Port Behavior
 
-The server always listens on one address (`ENCJSON_KEYS_ADDR`). It does not open separate HTTP and mTLS ports.
+The server always listens on one plain HTTP address (`ENCJSON_KEYS_ADDR`).
+Terminate TLS at reverse proxy / ingress.
 
-- `ENCJSON_KEYS_MTLS_MODE=required`: server runs TLS listener with client certificate verification (true mTLS).
-- otherwise: server runs plain HTTP listener.
-
-### Mode 1: HTTP + Bearer JWT
+### HTTP + Bearer JWT
 
 Use when TLS is terminated by reverse proxy / ingress (wildcard cert).
 
@@ -303,7 +251,6 @@ export ENCJSON_KEYS_JWT_ISSUER=https://sso.example.com
 # optional:
 # export ENCJSON_KEYS_JWKS_URL=https://sso.example.com/.well-known/jwks.json
 # export ENCJSON_KEYS_JWT_AUDIENCE=encjson-keys
-# ENCJSON_KEYS_MTLS_MODE not set
 ```
 
 The default bearer-token issuer is named `simple-idm-jwt`.
@@ -341,36 +288,6 @@ authz:
       tenants:
         - o2
 ```
-
-### Legacy Mode 2: True mTLS + SPIFFE policy
-
-Use when `encjson-keys-server` terminates TLS directly and requires client cert.
-This is retained for compatibility, but it is not the target architecture.
-Prefer bearer JWT with `simple-idm-jwt` or `kube-sa-jwt`.
-
-```bash
-export ENCJSON_KEYS_MTLS_MODE=required
-export ENCJSON_KEYS_TLS_CERT_FILE=/etc/tls/tls.crt
-export ENCJSON_KEYS_TLS_KEY_FILE=/etc/tls/tls.key
-export ENCJSON_KEYS_TLS_CLIENT_CA_FILE=/etc/tls/ca.crt
-export ENCJSON_KEYS_POLICY_FILE=/etc/encjson/policy.yaml
-```
-
-### Legacy Mode 3: mTLS + OAuth2/JWT
-
-Both layers can be enabled together:
-
-```bash
-export ENCJSON_KEYS_MTLS_MODE=required
-export ENCJSON_KEYS_AUTH=required
-```
-
-Request flow is:
-
-1. TLS handshake + client cert verification (transport layer).
-2. HTTP auth/authorization logic (application layer).
-
-In current implementation this is not strict "JWT and SPIFFE simultaneously on every endpoint". Most endpoints use JWT auth when enabled; endpoint `GET /api/v1/keys/{public_hex}/private` can use SPIFFE policy path when `Authorization` header is missing.
 
 ## ENV <-> CLI Matrix
 
@@ -430,8 +347,6 @@ This project now uses a unified model: every supported runtime environment varia
 | `ENCJSON_KEYS_KUBE_SA_JWKS_URL` | `--keys-kube-sa-jwks-url` |
 | `ENCJSON_KEYS_KUBE_SA_DISCOVERY_URL` | `--keys-kube-sa-discovery-url` |
 | `ENCJSON_KEYS_KUBE_SA_AUDIENCE` | `--keys-kube-sa-audience` |
-| `ENCJSON_KEYS_MTLS_MODE` | `--keys-mtls-mode` |
-| `ENCJSON_KEYS_POLICY_FILE` | `--keys-policy-file` |
 | `ENCJSON_KEYS_AUTHZ_FILE` | `--keys-authz-file` |
 | `ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE` | `--keys-rate-limit-per-minute` |
 | `ENCJSON_KEYS_REQUESTS_RATE_LIMIT_PER_MINUTE` | `--keys-requests-rate-limit-per-minute` |
@@ -441,9 +356,6 @@ This project now uses a unified model: every supported runtime environment varia
 | `ENCJSON_KEYS_UI_CLIENT_SECRET` | `--keys-ui-client-secret` |
 | `ENCJSON_KEYS_UI_BASE_URL` | `--keys-ui-base-url` |
 | `ENCJSON_KEYS_UI_COOKIE_SECURE` | `--keys-ui-cookie-secure` |
-| `ENCJSON_KEYS_TLS_CERT_FILE` | `--keys-tls-cert-file` |
-| `ENCJSON_KEYS_TLS_KEY_FILE` | `--keys-tls-key-file` |
-| `ENCJSON_KEYS_TLS_CLIENT_CA_FILE` | `--keys-tls-client-ca-file` |
 | `ENCJSON_KEYS_SERVER_SCOPE_REQUIRED` | `--keys-server-scope-required` |
 | `ENCJSON_TENANT` | `--tenant` |
 | `ENCJSON_ENV` | `--env` |
