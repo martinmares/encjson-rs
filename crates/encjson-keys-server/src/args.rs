@@ -18,6 +18,12 @@ pub(crate) struct Args {
     pub(crate) keys_jwks_url: Option<String>,
     #[arg(long, env = "ENCJSON_KEYS_JWT_AUDIENCE")]
     pub(crate) keys_jwt_audience: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_KUBE_SA_ISSUER")]
+    pub(crate) keys_kube_sa_issuer: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_KUBE_SA_JWKS_URL")]
+    pub(crate) keys_kube_sa_jwks_url: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_KUBE_SA_AUDIENCE")]
+    pub(crate) keys_kube_sa_audience: Option<String>,
     #[arg(long, env = "ENCJSON_KEYS_MTLS_MODE")]
     pub(crate) keys_mtls_mode: Option<String>,
     #[arg(long, env = "ENCJSON_KEYS_POLICY_FILE")]

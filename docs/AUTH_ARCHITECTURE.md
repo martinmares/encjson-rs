@@ -421,13 +421,20 @@ These services should follow the same pattern:
 ## Implementation Order
 
 1. Keep this document as the architecture contract.
-2. Refactor `encjson-keys-server` auth into issuer-based validation.
-3. Implement `simple-idm-jwt` as the first issuer backend.
-4. Implement `kube-sa-jwt` as the second issuer backend.
-5. Normalize all accepted identities into `Principal`.
+2. [x] Refactor `encjson-keys-server` auth into issuer-based validation.
+3. [x] Implement `simple-idm-jwt` as the first issuer backend.
+4. [x] Implement `kube-sa-jwt` as the second issuer backend.
+5. [x] Normalize accepted bearer JWT identities into `Principal`.
 6. Move key access decisions to a local policy evaluator.
 7. Reuse the same pattern in other services manually, without extracting a
    shared library too early.
+
+Current `kube-sa-jwt` implementation note:
+
+- accepts explicit `ENCJSON_KEYS_KUBE_SA_JWKS_URL`
+- validates issuer, audience, signature and ServiceAccount claim consistency
+- does not yet perform Kubernetes OIDC discovery automatically
+- does not yet refresh JWKS on unknown `kid`
 
 ## Important Constraint
 

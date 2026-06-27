@@ -43,7 +43,10 @@ use handlers_tenants::{create_tenant, delete_tenant, list_statuses, list_tenants
 use key_validation::{is_hex_64, validate_v3_bundles};
 use maintenance::{bootstrap_import, bootstrap_key_from_source, reencrypt_keys};
 use rate_limit::{RateLimitCfg, RateLimiter};
-use state::{AppState, BootstrapCfg, MtlsCfg};
+use state::{
+    AppState, AuthIssuer, AuthIssuerKind, BootstrapCfg, ISSUER_KUBE_SA_JWT, ISSUER_SIMPLE_IDM_JWT,
+    MtlsCfg,
+};
 use ui_handlers::{
     ui_callback, ui_index, ui_key_detail, ui_key_edit, ui_keys, ui_keys_list, ui_login, ui_logout,
     ui_reencrypt, ui_request_approve, ui_request_create, ui_request_reject, ui_requests,
@@ -209,17 +212,59 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     }
 
-    let jwks = if auth_required {
+    let auth_issuers = if auth_required {
         let issuer = jwt_issuer.as_ref().ok_or_else(|| {
             anyhow::anyhow!("ENCJSON_KEYS_JWT_ISSUER is required when auth is enabled")
         })?;
         let url = jwks_url
             .clone()
             .unwrap_or_else(|| format!("{}/.well-known/jwks.json", issuer.trim_end_matches('/')));
-        info!("loading JWKS from {}", url);
-        load_jwks(&url).await?
+        info!(
+            issuer_name = ISSUER_SIMPLE_IDM_JWT,
+            issuer = issuer,
+            jwks_url = url,
+            "loading auth issuer JWKS"
+        );
+        let mut issuers = vec![AuthIssuer {
+            name: ISSUER_SIMPLE_IDM_JWT.to_string(),
+            kind: AuthIssuerKind::SimpleIdmJwt,
+            issuer: issuer.clone(),
+            audience: jwt_audience,
+            jwks: load_jwks(&url).await?,
+        }];
+        if let Some(kube_issuer) = args
+            .keys_kube_sa_issuer
+            .as_ref()
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            let kube_jwks_url = args
+                .keys_kube_sa_jwks_url
+                .as_ref()
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ENCJSON_KEYS_KUBE_SA_JWKS_URL is required when kube-sa-jwt auth is enabled"
+                    )
+                })?;
+            info!(
+                issuer_name = ISSUER_KUBE_SA_JWT,
+                issuer = kube_issuer,
+                jwks_url = kube_jwks_url,
+                "loading auth issuer JWKS"
+            );
+            issuers.push(AuthIssuer {
+                name: ISSUER_KUBE_SA_JWT.to_string(),
+                kind: AuthIssuerKind::KubeSaJwt,
+                issuer: kube_issuer.to_string(),
+                audience: args.keys_kube_sa_audience.clone(),
+                jwks: load_jwks(kube_jwks_url).await?,
+            });
+        }
+        issuers
     } else {
-        std::collections::HashMap::new()
+        Vec::new()
     };
 
     let policy = match args.keys_policy_file {
@@ -250,9 +295,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         encryption_secret,
         auth_required,
-        jwt_issuer,
-        jwt_audience,
-        jwks,
+        auth_issuers,
         rate_limit: RateLimitCfg {
             per_minute: args.keys_rate_limit_per_minute.unwrap_or(60),
             requests_per_minute: args.keys_requests_rate_limit_per_minute.unwrap_or(30),
@@ -384,9 +427,7 @@ mod tests {
             db,
             encryption_secret: encryption_secret.to_string(),
             auth_required: false,
-            jwt_issuer: None,
-            jwt_audience: None,
-            jwks: HashMap::new(),
+            auth_issuers: Vec::new(),
             rate_limit: RateLimitCfg {
                 per_minute: 1000,
                 requests_per_minute: 1000,

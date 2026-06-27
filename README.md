@@ -180,7 +180,21 @@ export ENCJSON_KEYS_AUTH=required
 export ENCJSON_KEYS_JWT_ISSUER=https://sso.example.com
 ```
 
-True mTLS mode (client cert required):
+`ENCJSON_KEYS_JWT_*` configures the default `simple-idm-jwt` issuer.
+
+Optional Kubernetes/OpenShift projected ServiceAccount JWT issuer:
+
+```bash
+export ENCJSON_KEYS_KUBE_SA_ISSUER=https://kubernetes.default.svc
+export ENCJSON_KEYS_KUBE_SA_JWKS_URL=https://kubernetes.default.svc/openid/v1/jwks
+export ENCJSON_KEYS_KUBE_SA_AUDIENCE=key-server
+```
+
+This enables the `kube-sa-jwt` issuer. The server validates the token signature,
+issuer, audience and ServiceAccount identity claims, then normalizes the caller
+into the internal principal model.
+
+Legacy true mTLS mode (client cert required, not the target architecture):
 
 ```bash
 export ENCJSON_KEYS_MTLS_MODE=required
@@ -241,7 +255,7 @@ The server always listens on one address (`ENCJSON_KEYS_ADDR`). It does not open
 - `ENCJSON_KEYS_MTLS_MODE=required`: server runs TLS listener with client certificate verification (true mTLS).
 - otherwise: server runs plain HTTP listener.
 
-### Mode 1: HTTP + OAuth2/JWT
+### Mode 1: HTTP + Bearer JWT
 
 Use when TLS is terminated by reverse proxy / ingress (wildcard cert).
 
@@ -254,9 +268,23 @@ export ENCJSON_KEYS_JWT_ISSUER=https://sso.example.com
 # ENCJSON_KEYS_MTLS_MODE not set
 ```
 
-### Mode 2: True mTLS + SPIFFE policy
+The default bearer-token issuer is named `simple-idm-jwt`.
+
+Optional workload issuer:
+
+```bash
+export ENCJSON_KEYS_KUBE_SA_ISSUER=https://kubernetes.default.svc
+export ENCJSON_KEYS_KUBE_SA_JWKS_URL=https://kubernetes.default.svc/openid/v1/jwks
+export ENCJSON_KEYS_KUBE_SA_AUDIENCE=key-server
+```
+
+The workload issuer is named `kube-sa-jwt`.
+
+### Legacy Mode 2: True mTLS + SPIFFE policy
 
 Use when `encjson-keys-server` terminates TLS directly and requires client cert.
+This is retained for compatibility, but it is not the target architecture.
+Prefer bearer JWT with `simple-idm-jwt` or `kube-sa-jwt`.
 
 ```bash
 export ENCJSON_KEYS_MTLS_MODE=required
@@ -266,7 +294,7 @@ export ENCJSON_KEYS_TLS_CLIENT_CA_FILE=/etc/tls/ca.crt
 export ENCJSON_KEYS_POLICY_FILE=/etc/encjson/policy.yaml
 ```
 
-### Mode 3: mTLS + OAuth2/JWT
+### Legacy Mode 3: mTLS + OAuth2/JWT
 
 Both layers can be enabled together:
 
@@ -336,6 +364,9 @@ This project now uses a unified model: every supported runtime environment varia
 | `ENCJSON_KEYS_JWT_ISSUER` | `--keys-jwt-issuer` |
 | `ENCJSON_KEYS_JWKS_URL` | `--keys-jwks-url` |
 | `ENCJSON_KEYS_JWT_AUDIENCE` | `--keys-jwt-audience` |
+| `ENCJSON_KEYS_KUBE_SA_ISSUER` | `--keys-kube-sa-issuer` |
+| `ENCJSON_KEYS_KUBE_SA_JWKS_URL` | `--keys-kube-sa-jwks-url` |
+| `ENCJSON_KEYS_KUBE_SA_AUDIENCE` | `--keys-kube-sa-audience` |
 | `ENCJSON_KEYS_MTLS_MODE` | `--keys-mtls-mode` |
 | `ENCJSON_KEYS_POLICY_FILE` | `--keys-policy-file` |
 | `ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE` | `--keys-rate-limit-per-minute` |
