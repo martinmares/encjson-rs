@@ -466,6 +466,20 @@ Current `simple-config-server` implementation note:
 - validates Kubernetes ServiceAccount `sub` against namespace/serviceAccount claims
 - does not support legacy Basic Auth or `X-Client-Id` modes
 
+Current `kube-deploy-sync` implementation note:
+
+- supports opt-in trusted proxy headers through `auth.trusted_proxy.enabled`
+- protects UI and REST API when trusted proxy auth is enabled
+- uses service-specific groups:
+  - `kube-deploy-sync:role:admin`
+  - `kube-deploy-sync:namespace:*:reader`
+  - `kube-deploy-sync:namespace:*:operator`
+  - `kube-deploy-sync:namespace:<namespace>:reader`
+  - `kube-deploy-sync:namespace:<namespace>:operator`
+- filters namespace and sync target listings by namespace read access
+- requires namespace operator access for scale, restart, wave restart, exec and sync target mutations
+- keeps Bearer JWT support as a later step
+
 ## Implementation Order
 
 1. Keep this document as the architecture contract.
