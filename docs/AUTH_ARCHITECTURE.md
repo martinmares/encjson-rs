@@ -440,7 +440,7 @@ Current `kube-sa-jwt` implementation note:
 - accepts explicit `ENCJSON_KEYS_KUBE_SA_JWKS_URL` as an override
 - validates issuer, audience, signature and ServiceAccount claim consistency
 - supports local authorization grants through `ENCJSON_KEYS_AUTHZ_FILE`
-- does not yet refresh JWKS on unknown `kid`
+- refreshes JWKS on unknown `kid`
 
 ## Important Constraint
 

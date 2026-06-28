@@ -199,6 +199,9 @@ JWKS discovery order:
 2. otherwise use `ENCJSON_KEYS_KUBE_SA_DISCOVERY_URL` when set,
 3. otherwise use `{ENCJSON_KEYS_KUBE_SA_ISSUER}/.well-known/openid-configuration`.
 
+JWKS are loaded at startup and refreshed once when a token arrives with an
+unknown `kid`. This allows issuer key rotation without restarting the server.
+
 Bearer-token authorization is local to the keys server. Use
 `ENCJSON_KEYS_AUTHZ_FILE` to map normalized principals to key-server roles and
 tenant access:
@@ -267,6 +270,7 @@ By default the server loads JWKS URL from
 `{ENCJSON_KEYS_KUBE_SA_ISSUER}/.well-known/openid-configuration`. Set
 `ENCJSON_KEYS_KUBE_SA_DISCOVERY_URL` to override the discovery document URL, or
 `ENCJSON_KEYS_KUBE_SA_JWKS_URL` to bypass discovery entirely.
+JWKS cache is refreshed automatically on unknown `kid`.
 
 To grant workloads access to tenants, configure local bearer authorization:
 

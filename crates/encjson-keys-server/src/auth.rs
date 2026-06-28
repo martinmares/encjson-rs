@@ -66,7 +66,7 @@ pub(crate) enum Groups {
     Many(Vec<String>),
 }
 
-pub(crate) fn ensure_auth(
+pub(crate) async fn ensure_auth(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<AuthContext, Box<Response>> {
@@ -124,14 +124,55 @@ pub(crate) fn ensure_auth(
     };
     let kid = header
         .kid
+        .as_deref()
         .ok_or_else(|| Box::new(api_error(StatusCode::UNAUTHORIZED, "missing kid")))?;
-    let mut last_token_error = false;
-    let mut unknown_kid = true;
-    for issuer in &state.auth_issuers {
-        let Some(key) = issuer.jwks.get(&kid) else {
+
+    match try_auth_with_issuers(state, auth, &header, kid).await {
+        AuthAttempt::Allowed(ctx) => return Ok(*ctx),
+        AuthAttempt::Denied(resp) => return Err(resp),
+        AuthAttempt::InvalidToken => {
+            return Err(Box::new(api_error(
+                StatusCode::UNAUTHORIZED,
+                "token invalid",
+            )));
+        }
+        AuthAttempt::UnknownKid => {}
+    }
+
+    refresh_issuer_jwks_for_unknown_kid(state).await?;
+    match try_auth_with_issuers(state, auth, &header, kid).await {
+        AuthAttempt::Allowed(ctx) => Ok(*ctx),
+        AuthAttempt::Denied(resp) => Err(resp),
+        AuthAttempt::InvalidToken => Err(Box::new(api_error(
+            StatusCode::UNAUTHORIZED,
+            "token invalid",
+        ))),
+        AuthAttempt::UnknownKid => {
+            Err(Box::new(api_error(StatusCode::UNAUTHORIZED, "unknown kid")))
+        }
+    }
+}
+
+enum AuthAttempt {
+    Allowed(Box<AuthContext>),
+    Denied(Box<Response>),
+    UnknownKid,
+    InvalidToken,
+}
+
+async fn try_auth_with_issuers(
+    state: &AppState,
+    auth: &str,
+    header: &jsonwebtoken::Header,
+    kid: &str,
+) -> AuthAttempt {
+    let issuers = state.auth_issuers.read().await;
+    let mut saw_kid = false;
+    for issuer in issuers.iter() {
+        let Some(key) = issuer.jwks.get(kid) else {
             continue;
         };
-        unknown_kid = false;
+        saw_kid = true;
         let mut validation = Validation::new(header.alg);
         validation.set_issuer(&[issuer.issuer.as_str()]);
         if let Some(aud) = issuer.audience.as_ref() {
@@ -141,26 +182,46 @@ pub(crate) fn ensure_auth(
         }
         let token = match decode::<Claims>(auth, key, &validation) {
             Ok(token) => token,
-            Err(_) => {
-                last_token_error = true;
-                continue;
-            }
+            Err(_) => continue,
         };
-        return auth_context_from_claims(state.bearer_authz.as_ref(), issuer, token.claims);
+        match auth_context_from_claims(state.bearer_authz.as_ref(), issuer, token.claims) {
+            Ok(ctx) => return AuthAttempt::Allowed(Box::new(ctx)),
+            Err(resp) => return AuthAttempt::Denied(resp),
+        }
     }
-    if unknown_kid {
+    if saw_kid {
+        AuthAttempt::InvalidToken
+    } else {
+        AuthAttempt::UnknownKid
+    }
+}
+
+async fn refresh_issuer_jwks_for_unknown_kid(state: &AppState) -> Result<(), Box<Response>> {
+    let refresh_targets = {
+        let issuers = state.auth_issuers.read().await;
+        issuers
+            .iter()
+            .map(|issuer| (issuer.name.clone(), issuer.jwks_url.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    let mut refreshed = Vec::with_capacity(refresh_targets.len());
+    for (name, jwks_url) in refresh_targets {
+        if let Ok(jwks) = load_jwks(&jwks_url).await {
+            refreshed.push((name, jwks));
+        }
+    }
+    if refreshed.is_empty() {
         return Err(Box::new(api_error(StatusCode::UNAUTHORIZED, "unknown kid")));
     }
-    if last_token_error {
-        return Err(Box::new(api_error(
-            StatusCode::UNAUTHORIZED,
-            "token invalid",
-        )));
+
+    let mut issuers = state.auth_issuers.write().await;
+    for (name, jwks) in refreshed {
+        if let Some(issuer) = issuers.iter_mut().find(|issuer| issuer.name == name) {
+            issuer.jwks = jwks;
+        }
     }
-    Err(Box::new(api_error(
-        StatusCode::UNAUTHORIZED,
-        "token invalid",
-    )))
+    Ok(())
 }
 
 fn auth_context_from_claims(
@@ -333,7 +394,7 @@ struct MeResponse {
 }
 
 pub(crate) async fn get_me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -398,13 +459,16 @@ pub(crate) async fn decode_id_token(
     let header = decode_header(token)?;
     let kid = header.kid.ok_or_else(|| anyhow::anyhow!("missing kid"))?;
 
-    let key = if let Some(k) = state
-        .auth_issuers
-        .iter()
-        .find(|configured| configured.issuer == issuer)
-        .and_then(|configured| configured.jwks.get(&kid))
-    {
-        k.clone()
+    let key = {
+        let issuers = state.auth_issuers.read().await;
+        issuers
+            .iter()
+            .find(|configured| configured.issuer == issuer)
+            .and_then(|configured| configured.jwks.get(&kid))
+            .cloned()
+    };
+    let key = if let Some(key) = key {
+        key
     } else {
         let url = format!("{}/.well-known/jwks.json", issuer.trim_end_matches('/'));
         let jwks = load_jwks(&url).await?;
@@ -432,6 +496,7 @@ mod tests {
             kind: AuthIssuerKind::SimpleIdmJwt,
             issuer: "https://sso.example.com".to_string(),
             audience: Some("encjson-keys-server".to_string()),
+            jwks_url: "https://sso.example.com/.well-known/jwks.json".to_string(),
             jwks: HashMap::new(),
         }
     }
@@ -442,6 +507,7 @@ mod tests {
             kind: AuthIssuerKind::KubeSaJwt,
             issuer: "https://kubernetes.default.svc".to_string(),
             audience: Some("key-server".to_string()),
+            jwks_url: "https://kubernetes.default.svc/openid/v1/jwks".to_string(),
             jwks: HashMap::new(),
         }
     }

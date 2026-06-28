@@ -5,7 +5,7 @@ use encjson_core::key_sources::KeySourceOptions;
 use jsonwebtoken::DecodingKey;
 use serde::Serialize;
 use sqlx::PgPool;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::authz::BearerAuthzPolicy;
 use crate::rate_limit::{RateLimitCfg, RateLimiter};
@@ -16,7 +16,7 @@ pub(crate) struct AppState {
     pub(crate) db: PgPool,
     pub(crate) encryption_secret: String,
     pub(crate) auth_required: bool,
-    pub(crate) auth_issuers: Vec<AuthIssuer>,
+    pub(crate) auth_issuers: Arc<RwLock<Vec<AuthIssuer>>>,
     pub(crate) rate_limit: RateLimitCfg,
     pub(crate) rate_limiter: Arc<Mutex<RateLimiter>>,
     pub(crate) ui: UiCfg,
@@ -35,6 +35,7 @@ pub(crate) struct AuthIssuer {
     pub(crate) kind: AuthIssuerKind,
     pub(crate) issuer: String,
     pub(crate) audience: Option<String>,
+    pub(crate) jwks_url: String,
     pub(crate) jwks: HashMap<String, DecodingKey>,
 }
 

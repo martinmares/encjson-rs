@@ -104,7 +104,7 @@ pub(crate) async fn reencrypt_keys(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -187,7 +187,7 @@ pub(crate) async fn bootstrap_import(
     headers: HeaderMap,
     Json(payload): Json<BootstrapImportRequest>,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };

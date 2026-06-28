@@ -19,7 +19,7 @@ pub(crate) async fn create_request(
     headers: HeaderMap,
     Json(payload): Json<RequestCreate>,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -157,7 +157,7 @@ pub(crate) async fn list_requests(
     Query(query): Query<RequestListQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -195,7 +195,7 @@ pub(crate) async fn update_request(
     headers: HeaderMap,
     Json(payload): Json<RequestPatch>,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -255,7 +255,7 @@ pub(crate) async fn approve_request(
     headers: HeaderMap,
     Json(payload): Json<RequestApprove>,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -404,7 +404,7 @@ pub(crate) async fn reject_request(
     headers: HeaderMap,
     Json(payload): Json<RequestReject>,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };

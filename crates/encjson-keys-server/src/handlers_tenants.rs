@@ -14,7 +14,7 @@ pub(crate) async fn list_tenants(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -36,7 +36,7 @@ pub(crate) async fn create_tenant(
     headers: HeaderMap,
     Json(payload): Json<TenantCreate>,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -65,7 +65,7 @@ pub(crate) async fn rename_tenant(
     headers: HeaderMap,
     Json(payload): Json<TenantRename>,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -117,7 +117,7 @@ pub(crate) async fn delete_tenant(
     Path(name): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -185,7 +185,7 @@ pub(crate) async fn list_statuses(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };

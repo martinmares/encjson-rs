@@ -13,7 +13,7 @@ use encjson_core::key_sources::{
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info};
 
 mod api_error;
@@ -222,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
             kind: AuthIssuerKind::SimpleIdmJwt,
             issuer: issuer.clone(),
             audience: jwt_audience,
+            jwks_url: url.clone(),
             jwks: load_jwks(&url).await?,
         }];
         if let Some(kube_issuer) = args
@@ -268,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
                 kind: AuthIssuerKind::KubeSaJwt,
                 issuer: kube_issuer.to_string(),
                 audience: args.keys_kube_sa_audience.clone(),
+                jwks_url: kube_jwks_url.clone(),
                 jwks: load_jwks(&kube_jwks_url).await?,
             });
         }
@@ -290,7 +292,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         encryption_secret,
         auth_required,
-        auth_issuers,
+        auth_issuers: Arc::new(RwLock::new(auth_issuers)),
         rate_limit: RateLimitCfg {
             per_minute: args.keys_rate_limit_per_minute.unwrap_or(60),
             requests_per_minute: args.keys_requests_rate_limit_per_minute.unwrap_or(30),
@@ -400,7 +402,7 @@ mod tests {
             db,
             encryption_secret: encryption_secret.to_string(),
             auth_required: false,
-            auth_issuers: Vec::new(),
+            auth_issuers: Arc::new(RwLock::new(Vec::new())),
             rate_limit: RateLimitCfg {
                 per_minute: 1000,
                 requests_per_minute: 1000,

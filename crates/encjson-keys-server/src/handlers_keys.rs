@@ -20,7 +20,7 @@ pub(crate) async fn list_keys(
     Query(query): Query<KeyQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -84,7 +84,7 @@ pub(crate) async fn get_key(
     Path(public_hex): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
@@ -120,7 +120,7 @@ pub(crate) async fn get_private_key(
 
     match row {
         Ok(Some(row)) => {
-            let auth = match ensure_auth(&state, &headers) {
+            let auth = match ensure_auth(&state, &headers).await {
                 Ok(auth) => auth,
                 Err(resp) => return *resp,
             };
@@ -189,7 +189,7 @@ pub(crate) async fn get_key_bundle(
 
     match row {
         Ok(Some(row)) => {
-            let auth = match ensure_auth(&state, &headers) {
+            let auth = match ensure_auth(&state, &headers).await {
                 Ok(auth) => auth,
                 Err(resp) => return *resp,
             };
@@ -258,7 +258,7 @@ pub(crate) async fn patch_key(
     headers: HeaderMap,
     Json(payload): Json<KeyPatch>,
 ) -> impl IntoResponse {
-    let auth = match ensure_auth(&state, &headers) {
+    let auth = match ensure_auth(&state, &headers).await {
         Ok(auth) => auth,
         Err(resp) => return *resp,
     };
