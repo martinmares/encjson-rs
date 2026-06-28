@@ -480,6 +480,24 @@ Current `kube-deploy-sync` implementation note:
 - requires namespace operator access for scale, restart, wave restart, exec and sync target mutations
 - keeps Bearer JWT support as a later step
 
+Current `kube-edit-app` implementation note:
+
+- supports opt-in trusted proxy headers through `--trusted-proxy-auth` /
+  `KUBE_EDIT_TRUSTED_PROXY_AUTH=true`
+- protects UI and REST API when trusted proxy auth is enabled
+- uses service-specific groups:
+  - `kube-edit-app:role:admin`
+  - `kube-edit-app:env:*:reader`
+  - `kube-edit-app:env:*:writer`
+  - `kube-edit-app:env:<env>:reader`
+  - `kube-edit-app:env:<env>:writer`
+- filters environment listings by environment read access
+- requires environment writer access for structured environment mutations
+- requires `kube-edit-app:role:admin` for global Git commit/restore operations
+- still requires `--allow-write` for any mutating repository endpoint, even for
+  authenticated writers
+- keeps Bearer JWT support as a later step
+
 ## Implementation Order
 
 1. Keep this document as the architecture contract.
