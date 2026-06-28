@@ -81,6 +81,10 @@ X-Auth-Subject: 97173b5f-6277-4aa7-b15e-a6c0b03cf0fd
 X-Auth-Groups: app:role:admin,app:tenant:o2
 ```
 
+`simple-idm-oauth2-proxy` emits `X-Auth-Subject` from the stable OIDC `sub`
+claim. Applications should use it for audit and durable identity, and treat
+`X-Auth-User` as a display/login value.
+
 This model is suitable for:
 
 - internal web UIs
@@ -350,47 +354,47 @@ The service should own:
 Example local policy for `encjson-keys-server`:
 
 ```yaml
-authz:
-  rules:
-    - id: admin-group
-      principal:
-        issuer: simple-idm-jwt
-        groups:
-          - encjson:role:admin
-      allow:
-        - keys:admin
+bindings:
+  - id: admin-group
+    subjects:
+      issuer: simple-idm-jwt
+      groups:
+        - encjson:role:admin
+    permissions:
+      - resource: keys
+        actions: [admin]
 
-    - id: tenant-o2-read
-      principal:
-        issuer: simple-idm-jwt
-        groups:
-          - encjson:tenant:o2
-      allow:
-        - keys:read
-      tenants:
-        - o2
+  - id: tenant-o2-read
+    subjects:
+      issuer: simple-idm-jwt
+      groups:
+        - encjson:tenant:o2
+    permissions:
+      - resource: keys
+        actions: [read]
+        tenants: [o2]
 
-    - id: gitlab-o2-read
-      principal:
-        issuer: simple-idm-jwt
-        client_id: gitlab-ci
-        scopes:
-          - keys:read
-      allow:
+  - id: gitlab-o2-read
+    subjects:
+      issuer: simple-idm-jwt
+      client_id: gitlab-ci
+      scopes:
         - keys:read
-      tenants:
-        - o2
+    permissions:
+      - resource: keys
+        actions: [read]
+        tenants: [o2]
 
-    - id: order-api-o2-read
-      principal:
-        issuer: kube-sa-jwt
-        kind: workload
-        namespace: zis-test
-        service_account: order-api
-      allow:
-        - keys:read
-      tenants:
-        - o2
+  - id: order-api-o2-read
+    subjects:
+      issuer: kube-sa-jwt
+      kind: workload
+      namespace: zis-test
+      service_account: order-api
+    permissions:
+      - resource: keys
+        actions: [read]
+        tenants: [o2]
 ```
 
 ## OpenShift ServiceAccount JWT Requirements
@@ -466,6 +470,21 @@ Current `simple-config-server` implementation note:
 - validates Kubernetes ServiceAccount `sub` against namespace/serviceAccount claims
 - does not support legacy Basic Auth or `X-Client-Id` modes
 
+Current `simple-artifacts-server` implementation note:
+
+- supports trusted proxy `X-Auth-*` headers for UI and API identity
+- uses service-specific groups:
+  - `simple-artifacts:role:admin`
+  - `simple-artifacts:repo:*:*:read`
+  - `simple-artifacts:repo:*:*:write`
+  - `simple-artifacts:repo:<repo_type>:*:read`
+  - `simple-artifacts:repo:<repo_type>:*:write`
+  - `simple-artifacts:repo:<repo_type>:<repo_name>:read`
+  - `simple-artifacts:repo:<repo_type>:<repo_name>:write`
+- keeps public repository read rules in local `policy.yaml`
+- does not support legacy Basic Auth or `X-Client-Id` modes
+- keeps Bearer JWT support as a later step
+
 Current `kube-deploy-sync` implementation note:
 
 - supports opt-in trusted proxy headers through `auth.trusted_proxy.enabled`
@@ -515,7 +534,7 @@ Current `kube-sa-jwt` implementation note:
 - loads JWKS URL from OIDC discovery by default
 - accepts explicit `ENCJSON_KEYS_KUBE_SA_JWKS_URL` as an override
 - validates issuer, audience, signature and ServiceAccount claim consistency
-- supports local authorization grants through `ENCJSON_KEYS_AUTHZ_FILE`
+- supports local authorization grants through `ENCJSON_KEYS_POLICY_FILE`
 - refreshes JWKS on unknown `kid`
 
 ## Important Constraint

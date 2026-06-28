@@ -5,43 +5,36 @@ use serde::Deserialize;
 use crate::state::Principal;
 
 #[derive(Clone, Debug)]
-pub(crate) struct BearerAuthzPolicy {
-    rules: Vec<BearerAuthzRule>,
+pub(crate) struct LocalPolicy {
+    bindings: Vec<PolicyBinding>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct BearerAuthzGrant {
+pub(crate) struct LocalPolicyGrant {
     pub(crate) is_admin: bool,
     pub(crate) is_scoped: bool,
     pub(crate) tenants: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct BearerAuthzFile {
+#[serde(deny_unknown_fields)]
+struct PolicyFile {
     #[serde(default)]
-    authz: BearerAuthzConfig,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-struct BearerAuthzConfig {
-    #[serde(default)]
-    rules: Vec<BearerAuthzRule>,
+    bindings: Vec<PolicyBinding>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct BearerAuthzRule {
+struct PolicyBinding {
     #[allow(dead_code)]
     #[serde(default)]
     id: Option<String>,
-    principal: BearerAuthzPrincipal,
+    subjects: PolicySubjects,
     #[serde(default)]
-    allow: Vec<String>,
-    #[serde(default)]
-    tenants: Vec<String>,
+    permissions: Vec<PolicyPermission>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct BearerAuthzPrincipal {
+struct PolicySubjects {
     issuer: String,
     #[serde(default)]
     kind: Option<String>,
@@ -59,8 +52,17 @@ struct BearerAuthzPrincipal {
     service_account: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct PolicyPermission {
+    resource: String,
+    #[serde(default)]
+    actions: Vec<String>,
+    #[serde(default)]
+    tenants: Vec<String>,
+}
+
 #[derive(Debug)]
-pub(crate) enum BearerAuthzLoadError {
+pub(crate) enum LocalPolicyLoadError {
     ReadFile {
         path: String,
         source: std::io::Error,
@@ -71,51 +73,51 @@ pub(crate) enum BearerAuthzLoadError {
     },
 }
 
-impl std::fmt::Display for BearerAuthzLoadError {
+impl std::fmt::Display for LocalPolicyLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ReadFile { path, source } => {
-                write!(f, "failed to read authz file {path}: {source}")
+                write!(f, "failed to read policy file {path}: {source}")
             }
             Self::ParseFile { path, source } => {
-                write!(f, "invalid authz yaml in {path}: {source}")
+                write!(f, "invalid policy yaml in {path}: {source}")
             }
         }
     }
 }
 
-impl std::error::Error for BearerAuthzLoadError {}
+impl std::error::Error for LocalPolicyLoadError {}
 
-impl BearerAuthzPolicy {
-    pub(crate) fn from_file(path: &Path) -> Result<Self, BearerAuthzLoadError> {
+impl LocalPolicy {
+    pub(crate) fn from_file(path: &Path) -> Result<Self, LocalPolicyLoadError> {
         let p = path.display().to_string();
         let raw =
-            std::fs::read_to_string(path).map_err(|source| BearerAuthzLoadError::ReadFile {
+            std::fs::read_to_string(path).map_err(|source| LocalPolicyLoadError::ReadFile {
                 path: p.clone(),
                 source,
             })?;
-        let parsed = serde_yaml_ng::from_str::<BearerAuthzFile>(&raw)
-            .map_err(|source| BearerAuthzLoadError::ParseFile { path: p, source })?;
+        let parsed = serde_yaml_ng::from_str::<PolicyFile>(&raw)
+            .map_err(|source| LocalPolicyLoadError::ParseFile { path: p, source })?;
         Ok(Self {
-            rules: parsed.authz.rules,
+            bindings: parsed.bindings,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn from_yaml(raw: &str) -> Result<Self, serde_yaml_ng::Error> {
-        let parsed = serde_yaml_ng::from_str::<BearerAuthzFile>(raw)?;
+        let parsed = serde_yaml_ng::from_str::<PolicyFile>(raw)?;
         Ok(Self {
-            rules: parsed.authz.rules,
+            bindings: parsed.bindings,
         })
     }
 
-    pub(crate) fn evaluate(&self, principal: &Principal) -> BearerAuthzGrant {
-        let mut grant = BearerAuthzGrant::default();
-        for rule in &self.rules {
-            if !rule.principal.matches(principal) {
+    pub(crate) fn evaluate(&self, principal: &Principal) -> LocalPolicyGrant {
+        let mut grant = LocalPolicyGrant::default();
+        for binding in &self.bindings {
+            if !binding.subjects.matches(principal) {
                 continue;
             }
-            grant.merge(rule.grant());
+            grant.merge(binding.grant());
         }
         grant.tenants.sort();
         grant.tenants.dedup();
@@ -123,7 +125,7 @@ impl BearerAuthzPolicy {
     }
 }
 
-impl BearerAuthzGrant {
+impl LocalPolicyGrant {
     fn merge(&mut self, other: Self) {
         self.is_admin = self.is_admin || other.is_admin;
         self.is_scoped = self.is_scoped || other.is_scoped;
@@ -131,30 +133,43 @@ impl BearerAuthzGrant {
     }
 }
 
-impl BearerAuthzRule {
-    fn grant(&self) -> BearerAuthzGrant {
-        let mut grant = BearerAuthzGrant::default();
-        for allow in &self.allow {
-            match allow.as_str() {
-                "*" | "admin" | "keys:admin" => {
-                    grant.is_admin = true;
-                    grant.is_scoped = true;
+impl PolicyBinding {
+    fn grant(&self) -> LocalPolicyGrant {
+        let mut grant = LocalPolicyGrant::default();
+        for permission in &self.permissions {
+            match permission.resource.as_str() {
+                "keys" => {
+                    if permission.has_action("*") || permission.has_action("admin") {
+                        grant.is_admin = true;
+                        grant.is_scoped = true;
+                    }
+                    if permission.has_action("read") {
+                        grant.is_scoped = true;
+                    }
                 }
-                "keys:read" | "requests:create" => {
-                    grant.is_scoped = true;
+                "requests" => {
+                    if permission.has_action("create") {
+                        grant.is_scoped = true;
+                    }
                 }
                 _ => {}
             }
-        }
-        if !self.tenants.is_empty() {
-            grant.is_scoped = true;
-            grant.tenants.extend(self.tenants.iter().cloned());
+            if !permission.tenants.is_empty() {
+                grant.is_scoped = true;
+                grant.tenants.extend(permission.tenants.iter().cloned());
+            }
         }
         grant
     }
 }
 
-impl BearerAuthzPrincipal {
+impl PolicyPermission {
+    fn has_action(&self, action: &str) -> bool {
+        self.actions.iter().any(|candidate| candidate == action)
+    }
+}
+
+impl PolicySubjects {
     fn matches(&self, principal: &Principal) -> bool {
         if self.issuer != principal.issuer {
             return false;
@@ -243,19 +258,18 @@ mod tests {
 
     #[test]
     fn kube_workload_policy_grants_tenant_read() {
-        let policy = BearerAuthzPolicy::from_yaml(
+        let policy = LocalPolicy::from_yaml(
             r#"
-authz:
-  rules:
-    - principal:
-        issuer: kube-sa-jwt
-        kind: workload
-        namespace: zis-test
-        service_account: order-api
-      allow:
-        - keys:read
-      tenants:
-        - o2
+bindings:
+  - subjects:
+      issuer: kube-sa-jwt
+      kind: workload
+      namespace: zis-test
+      service_account: order-api
+    permissions:
+      - resource: keys
+        actions: [read]
+        tenants: [o2]
 "#,
         )
         .unwrap();
@@ -268,24 +282,36 @@ authz:
 
     #[test]
     fn kube_workload_policy_rejects_other_service_account() {
-        let policy = BearerAuthzPolicy::from_yaml(
+        let policy = LocalPolicy::from_yaml(
             r#"
-authz:
-  rules:
-    - principal:
-        issuer: kube-sa-jwt
-        kind: workload
-        namespace: zis-test
-        service_account: other-api
-      allow:
-        - keys:read
-      tenants:
-        - o2
+bindings:
+  - subjects:
+      issuer: kube-sa-jwt
+      kind: workload
+      namespace: zis-test
+      service_account: other-api
+    permissions:
+      - resource: keys
+        actions: [read]
+        tenants: [o2]
 "#,
         )
         .unwrap();
 
         let grant = policy.evaluate(&workload_principal());
-        assert_eq!(grant, BearerAuthzGrant::default());
+        assert_eq!(grant, LocalPolicyGrant::default());
+    }
+
+    #[test]
+    fn old_authz_yaml_is_not_supported() {
+        let raw = r#"
+authz:
+  rules:
+    - principal:
+        issuer: kube-sa-jwt
+      allow:
+        - keys:read
+"#;
+        assert!(LocalPolicy::from_yaml(raw).is_err());
     }
 }

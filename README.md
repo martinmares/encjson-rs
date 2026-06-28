@@ -203,36 +203,36 @@ JWKS are loaded at startup and refreshed once when a token arrives with an
 unknown `kid`. This allows issuer key rotation without restarting the server.
 
 Bearer-token authorization is local to the keys server. Use
-`ENCJSON_KEYS_AUTHZ_FILE` to map normalized principals to key-server roles and
+`ENCJSON_KEYS_POLICY_FILE` to map normalized principals to key-server roles and
 tenant access:
 
 ```bash
-export ENCJSON_KEYS_AUTHZ_FILE=/etc/encjson/bearer-authz.yaml
+export ENCJSON_KEYS_POLICY_FILE=/etc/encjson/policy.yaml
 ```
 
-Example `bearer-authz.yaml`:
+Example `policy.yaml`:
 
 ```yaml
-authz:
-  rules:
-    - id: admin-group
-      principal:
-        issuer: simple-idm-jwt
-        groups:
-          - encjson:role:admin
-      allow:
-        - keys:admin
+bindings:
+  - id: admin-group
+    subjects:
+      issuer: simple-idm-jwt
+      groups:
+        - encjson:role:admin
+    permissions:
+      - resource: keys
+        actions: [admin]
 
-    - id: order-api-read-o2
-      principal:
-        issuer: kube-sa-jwt
-        kind: workload
-        namespace: zis-test
-        service_account: order-api
-      allow:
-        - keys:read
-      tenants:
-        - o2
+  - id: order-api-read-o2
+    subjects:
+      issuer: kube-sa-jwt
+      kind: workload
+      namespace: zis-test
+      service_account: order-api
+    permissions:
+      - resource: keys
+        actions: [read]
+        tenants: [o2]
 ```
 
 Optional trusted proxy header authentication:
@@ -292,10 +292,10 @@ By default the server loads JWKS URL from
 `ENCJSON_KEYS_KUBE_SA_JWKS_URL` to bypass discovery entirely.
 JWKS cache is refreshed automatically on unknown `kid`.
 
-To grant workloads access to tenants, configure local bearer authorization:
+To grant workloads access to tenants, configure local policy:
 
 ```bash
-export ENCJSON_KEYS_AUTHZ_FILE=/etc/encjson/bearer-authz.yaml
+export ENCJSON_KEYS_POLICY_FILE=/etc/encjson/policy.yaml
 ```
 
 ### HTTP + Trusted Proxy Headers
@@ -320,18 +320,17 @@ for Simple IDM JWTs: `encjson:role:admin`, `encjson:role:scoped` and
 proxy`.
 
 ```yaml
-authz:
-  rules:
-    - id: order-api-read-o2
-      principal:
-        issuer: kube-sa-jwt
-        kind: workload
-        namespace: zis-test
-        service_account: order-api
-      allow:
-        - keys:read
-      tenants:
-        - o2
+bindings:
+  - id: order-api-read-o2
+    subjects:
+      issuer: kube-sa-jwt
+      kind: workload
+      namespace: zis-test
+      service_account: order-api
+    permissions:
+      - resource: keys
+        actions: [read]
+        tenants: [o2]
 ```
 
 ## ENV <-> CLI Matrix
@@ -392,7 +391,7 @@ This project now uses a unified model: every supported runtime environment varia
 | `ENCJSON_KEYS_KUBE_SA_JWKS_URL` | `--keys-kube-sa-jwks-url` |
 | `ENCJSON_KEYS_KUBE_SA_DISCOVERY_URL` | `--keys-kube-sa-discovery-url` |
 | `ENCJSON_KEYS_KUBE_SA_AUDIENCE` | `--keys-kube-sa-audience` |
-| `ENCJSON_KEYS_AUTHZ_FILE` | `--keys-authz-file` |
+| `ENCJSON_KEYS_POLICY_FILE` | `--keys-policy-file` |
 | `ENCJSON_KEYS_TRUSTED_PROXY_HEADERS` | `--keys-trusted-proxy-headers` |
 | `ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE` | `--keys-rate-limit-per-minute` |
 | `ENCJSON_KEYS_REQUESTS_RATE_LIMIT_PER_MINUTE` | `--keys-requests-rate-limit-per-minute` |

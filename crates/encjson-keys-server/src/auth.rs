@@ -8,7 +8,7 @@ use jsonwebtoken::{DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::{Deserialize, Serialize};
 
 use crate::api_error::api_error;
-use crate::authz::BearerAuthzPolicy;
+use crate::policy::LocalPolicy;
 use crate::state::{
     AppState, AuthIssuer, AuthIssuerKind, AuthMethod, ISSUER_PROXY, Principal, PrincipalKind,
 };
@@ -98,7 +98,7 @@ pub(crate) async fn ensure_auth(
     }
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
         if state.trusted_proxy_headers {
-            return auth_context_from_proxy_headers(state.bearer_authz.as_ref(), headers);
+            return auth_context_from_proxy_headers(state.local_policy.as_ref(), headers);
         }
         return Err(Box::new(api_error(
             StatusCode::UNAUTHORIZED,
@@ -189,7 +189,7 @@ async fn try_auth_with_issuers(
             Ok(token) => token,
             Err(_) => continue,
         };
-        match auth_context_from_claims(state.bearer_authz.as_ref(), issuer, token.claims) {
+        match auth_context_from_claims(state.local_policy.as_ref(), issuer, token.claims) {
             Ok(ctx) => return AuthAttempt::Allowed(Box::new(ctx)),
             Err(resp) => return AuthAttempt::Denied(resp),
         }
@@ -230,7 +230,7 @@ async fn refresh_issuer_jwks_for_unknown_kid(state: &AppState) -> Result<(), Box
 }
 
 fn auth_context_from_claims(
-    policy: Option<&BearerAuthzPolicy>,
+    policy: Option<&LocalPolicy>,
     issuer: &AuthIssuer,
     claims: Claims,
 ) -> Result<AuthContext, Box<Response>> {
@@ -273,7 +273,7 @@ fn auth_context_from_claims(
 }
 
 fn auth_context_from_proxy_headers(
-    policy: Option<&BearerAuthzPolicy>,
+    policy: Option<&LocalPolicy>,
     headers: &HeaderMap,
 ) -> Result<AuthContext, Box<Response>> {
     let subject = header_str(headers, "x-auth-subject")
@@ -691,19 +691,18 @@ mod tests {
 
     #[test]
     fn kube_sa_claims_can_be_authorized_by_local_policy_without_groups() {
-        let policy = BearerAuthzPolicy::from_yaml(
+        let policy = LocalPolicy::from_yaml(
             r#"
-authz:
-  rules:
-    - principal:
-        issuer: kube-sa-jwt
-        kind: workload
-        namespace: zis-test
-        service_account: order-api
-      allow:
-        - keys:read
-      tenants:
-        - o2
+bindings:
+  - subjects:
+      issuer: kube-sa-jwt
+      kind: workload
+      namespace: zis-test
+      service_account: order-api
+    permissions:
+      - resource: keys
+        actions: [read]
+        tenants: [o2]
 "#,
         )
         .unwrap();
@@ -759,18 +758,17 @@ authz:
 
     #[test]
     fn proxy_headers_can_be_authorized_by_local_policy() {
-        let policy = BearerAuthzPolicy::from_yaml(
+        let policy = LocalPolicy::from_yaml(
             r#"
-authz:
-  rules:
-    - principal:
-        issuer: proxy
-        groups:
-          - app:role:support
-      allow:
-        - keys:read
-      tenants:
-        - cetin
+bindings:
+  - subjects:
+      issuer: proxy
+      groups:
+        - app:role:support
+    permissions:
+      - resource: keys
+        actions: [read]
+        tenants: [cetin]
 "#,
         )
         .unwrap();

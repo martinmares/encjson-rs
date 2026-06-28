@@ -26,8 +26,8 @@ pub(crate) struct Args {
     pub(crate) keys_kube_sa_discovery_url: Option<String>,
     #[arg(long, env = "ENCJSON_KEYS_KUBE_SA_AUDIENCE")]
     pub(crate) keys_kube_sa_audience: Option<String>,
-    #[arg(long, env = "ENCJSON_KEYS_AUTHZ_FILE")]
-    pub(crate) keys_authz_file: Option<String>,
+    #[arg(long, env = "ENCJSON_KEYS_POLICY_FILE")]
+    pub(crate) keys_policy_file: Option<String>,
     #[arg(
         long,
         env = "ENCJSON_KEYS_TRUSTED_PROXY_HEADERS",

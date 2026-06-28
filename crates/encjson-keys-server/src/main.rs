@@ -19,7 +19,6 @@ use tracing::{error, info};
 mod api_error;
 mod args;
 mod auth;
-mod authz;
 mod crypto_store;
 mod handlers_keys;
 mod handlers_requests;
@@ -27,6 +26,7 @@ mod handlers_tenants;
 mod key_validation;
 mod maintenance;
 mod models;
+mod policy;
 mod rate_limit;
 mod state;
 mod ui_handlers;
@@ -35,7 +35,6 @@ mod ui_state;
 
 use args::{Args, KeySourceCli};
 use auth::{discover_jwks_uri, ensure_auth, get_me, load_jwks};
-use authz::BearerAuthzPolicy;
 use handlers_keys::{get_key, get_key_bundle, get_private_key, list_keys, patch_key};
 use handlers_requests::{
     approve_request, create_request, list_requests, reject_request, update_request,
@@ -43,6 +42,7 @@ use handlers_requests::{
 use handlers_tenants::{create_tenant, delete_tenant, list_statuses, list_tenants, rename_tenant};
 use key_validation::{is_hex_64, validate_v3_bundles};
 use maintenance::{bootstrap_import, bootstrap_key_from_source, reencrypt_keys};
+use policy::LocalPolicy;
 use rate_limit::{RateLimitCfg, RateLimiter};
 use state::{
     AppState, AuthIssuer, AuthIssuerKind, BootstrapCfg, ISSUER_KUBE_SA_JWT, ISSUER_SIMPLE_IDM_JWT,
@@ -278,11 +278,11 @@ async fn main() -> anyhow::Result<()> {
         Vec::new()
     };
 
-    let bearer_authz = match args.keys_authz_file {
+    let local_policy = match args.keys_policy_file {
         Some(path) if !path.trim().is_empty() => {
-            let parsed = BearerAuthzPolicy::from_file(std::path::Path::new(&path))
+            let parsed = LocalPolicy::from_file(std::path::Path::new(&path))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            info!("loaded bearer authz file {}", path);
+            info!("loaded local policy file {}", path);
             Some(parsed)
         }
         _ => None,
@@ -312,7 +312,7 @@ async fn main() -> anyhow::Result<()> {
         },
         ui_states: Arc::new(Mutex::new(HashMap::new())),
         ui_sessions: Arc::new(Mutex::new(HashMap::new())),
-        bearer_authz,
+        local_policy,
         bootstrap: BootstrapCfg {
             source_options: key_source_options,
             default_status: args.keys_bootstrap_status.clone(),
@@ -423,7 +423,7 @@ mod tests {
             },
             ui_states: Arc::new(Mutex::new(HashMap::new())),
             ui_sessions: Arc::new(Mutex::new(HashMap::new())),
-            bearer_authz: None,
+            local_policy: None,
             bootstrap: BootstrapCfg {
                 source_options: None,
                 default_status: STATUS_ACTIVE.to_string(),
