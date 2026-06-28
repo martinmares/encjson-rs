@@ -287,12 +287,16 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => None,
     };
+    if args.keys_trusted_proxy_headers {
+        info!("trusted proxy headers enabled; ensure direct public access is blocked");
+    }
 
     let state = AppState {
         db,
         encryption_secret,
         auth_required,
         auth_issuers: Arc::new(RwLock::new(auth_issuers)),
+        trusted_proxy_headers: args.keys_trusted_proxy_headers,
         rate_limit: RateLimitCfg {
             per_minute: args.keys_rate_limit_per_minute.unwrap_or(60),
             requests_per_minute: args.keys_requests_rate_limit_per_minute.unwrap_or(30),
@@ -403,6 +407,7 @@ mod tests {
             encryption_secret: encryption_secret.to_string(),
             auth_required: false,
             auth_issuers: Arc::new(RwLock::new(Vec::new())),
+            trusted_proxy_headers: false,
             rate_limit: RateLimitCfg {
                 per_minute: 1000,
                 requests_per_minute: 1000,

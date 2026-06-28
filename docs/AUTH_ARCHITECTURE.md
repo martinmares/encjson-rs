@@ -210,6 +210,27 @@ Headers such as `X-Auth-Token` must not be forwarded by default. Forward a raw
 access token only when the downstream application explicitly needs delegated API
 calls.
 
+For `encjson-keys-server`, trusted proxy headers are accepted only when
+explicitly enabled through `ENCJSON_KEYS_TRUSTED_PROXY_HEADERS=true` /
+`--keys-trusted-proxy-headers`.
+
+The normalized issuer is:
+
+```text
+proxy
+```
+
+The supported headers are:
+
+```http
+X-Auth-Subject: 97173b5f-6277-4aa7-b15e-a6c0b03cf0fd
+X-Auth-User: mares
+X-Auth-Email: mares@example.com
+X-Auth-Groups: encjson:role:scoped,encjson:tenant:o2
+```
+
+`X-Auth-Groups` is comma-separated.
+
 ## Bearer Token Issuers
 
 Services that accept bearer tokens should support multiple configured issuers.
@@ -431,7 +452,8 @@ These services should follow the same pattern:
 4. [x] Implement `kube-sa-jwt` as the second issuer backend.
 5. [x] Normalize accepted bearer JWT identities into `Principal`.
 6. [x] Move bearer-token key access decisions to a local policy evaluator.
-7. Reuse the same pattern in other services manually, without extracting a
+7. [x] Add opt-in trusted proxy header normalization to `encjson-keys-server`.
+8. Reuse the same pattern in other services manually, without extracting a
    shared library too early.
 
 Current `kube-sa-jwt` implementation note:

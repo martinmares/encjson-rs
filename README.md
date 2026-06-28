@@ -235,6 +235,26 @@ authz:
         - o2
 ```
 
+Optional trusted proxy header authentication:
+
+```bash
+export ENCJSON_KEYS_TRUSTED_PROXY_HEADERS=true
+```
+
+When enabled and no `Authorization: Bearer ...` header is present, the server
+accepts identity from a protected proxy through:
+
+```http
+X-Auth-Subject: 97173b5f-6277-4aa7-b15e-a6c0b03cf0fd
+X-Auth-User: mares
+X-Auth-Email: mares@example.com
+X-Auth-Groups: encjson:role:scoped,encjson:tenant:o2
+```
+
+The normalized issuer is `proxy`. This mode is safe only when direct public
+access to `encjson-keys-server` is blocked and the edge proxy strips all
+client-supplied `X-Auth-*` headers before setting trusted values.
+
 ## Keys Server Runtime Modes
 
 `encjson-keys-server` supports both CLI arguments and environment variables (same names via `clap` `env = ...` mapping).
@@ -277,6 +297,27 @@ To grant workloads access to tenants, configure local bearer authorization:
 ```bash
 export ENCJSON_KEYS_AUTHZ_FILE=/etc/encjson/bearer-authz.yaml
 ```
+
+### HTTP + Trusted Proxy Headers
+
+Use when `encjson-keys-server` is reachable only behind a trusted auth proxy.
+
+```bash
+export ENCJSON_KEYS_AUTH=required
+export ENCJSON_KEYS_TRUSTED_PROXY_HEADERS=true
+```
+
+Accepted headers:
+
+- `X-Auth-Subject`
+- `X-Auth-User`
+- `X-Auth-Email`
+- `X-Auth-Groups`
+
+`X-Auth-Groups` is comma-separated. Built-in group conventions are the same as
+for Simple IDM JWTs: `encjson:role:admin`, `encjson:role:scoped` and
+`encjson:tenant:<tenant>`. Local policy can also grant access to `issuer:
+proxy`.
 
 ```yaml
 authz:
@@ -352,6 +393,7 @@ This project now uses a unified model: every supported runtime environment varia
 | `ENCJSON_KEYS_KUBE_SA_DISCOVERY_URL` | `--keys-kube-sa-discovery-url` |
 | `ENCJSON_KEYS_KUBE_SA_AUDIENCE` | `--keys-kube-sa-audience` |
 | `ENCJSON_KEYS_AUTHZ_FILE` | `--keys-authz-file` |
+| `ENCJSON_KEYS_TRUSTED_PROXY_HEADERS` | `--keys-trusted-proxy-headers` |
 | `ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE` | `--keys-rate-limit-per-minute` |
 | `ENCJSON_KEYS_REQUESTS_RATE_LIMIT_PER_MINUTE` | `--keys-requests-rate-limit-per-minute` |
 | `ENCJSON_KEYS_UI_ENABLED` | `--keys-ui-enabled` |

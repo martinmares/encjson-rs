@@ -28,6 +28,12 @@ pub(crate) struct Args {
     pub(crate) keys_kube_sa_audience: Option<String>,
     #[arg(long, env = "ENCJSON_KEYS_AUTHZ_FILE")]
     pub(crate) keys_authz_file: Option<String>,
+    #[arg(
+        long,
+        env = "ENCJSON_KEYS_TRUSTED_PROXY_HEADERS",
+        default_value_t = false
+    )]
+    pub(crate) keys_trusted_proxy_headers: bool,
     #[arg(long, env = "ENCJSON_KEYS_RATE_LIMIT_PER_MINUTE")]
     pub(crate) keys_rate_limit_per_minute: Option<u64>,
     #[arg(long, env = "ENCJSON_KEYS_REQUESTS_RATE_LIMIT_PER_MINUTE")]

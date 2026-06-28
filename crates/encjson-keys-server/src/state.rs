@@ -17,6 +17,7 @@ pub(crate) struct AppState {
     pub(crate) encryption_secret: String,
     pub(crate) auth_required: bool,
     pub(crate) auth_issuers: Arc<RwLock<Vec<AuthIssuer>>>,
+    pub(crate) trusted_proxy_headers: bool,
     pub(crate) rate_limit: RateLimitCfg,
     pub(crate) rate_limiter: Arc<Mutex<RateLimiter>>,
     pub(crate) ui: UiCfg,
@@ -28,6 +29,7 @@ pub(crate) struct AppState {
 
 pub(crate) const ISSUER_SIMPLE_IDM_JWT: &str = "simple-idm-jwt";
 pub(crate) const ISSUER_KUBE_SA_JWT: &str = "kube-sa-jwt";
+pub(crate) const ISSUER_PROXY: &str = "proxy";
 
 #[derive(Clone, Debug)]
 pub(crate) struct AuthIssuer {
@@ -65,6 +67,7 @@ pub(crate) struct Principal {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AuthMethod {
     BearerToken,
+    TrustedProxyHeaders,
     Disabled,
 }
 

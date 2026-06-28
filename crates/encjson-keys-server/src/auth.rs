@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::api_error::api_error;
 use crate::authz::BearerAuthzPolicy;
-use crate::state::{AppState, AuthIssuer, AuthIssuerKind, AuthMethod, Principal, PrincipalKind};
+use crate::state::{
+    AppState, AuthIssuer, AuthIssuerKind, AuthMethod, ISSUER_PROXY, Principal, PrincipalKind,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AuthContext {
@@ -95,6 +97,9 @@ pub(crate) async fn ensure_auth(
         });
     }
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
+        if state.trusted_proxy_headers {
+            return auth_context_from_proxy_headers(state.bearer_authz.as_ref(), headers);
+        }
         return Err(Box::new(api_error(
             StatusCode::UNAUTHORIZED,
             "missing authorization",
@@ -265,6 +270,91 @@ fn auth_context_from_claims(
         groups,
         principal,
     })
+}
+
+fn auth_context_from_proxy_headers(
+    policy: Option<&BearerAuthzPolicy>,
+    headers: &HeaderMap,
+) -> Result<AuthContext, Box<Response>> {
+    let subject = header_str(headers, "x-auth-subject")
+        .or_else(|| header_str(headers, "x-auth-user"))
+        .map(str::to_string);
+    if subject.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(Box::new(api_error(
+            StatusCode::UNAUTHORIZED,
+            "missing proxy identity",
+        )));
+    }
+
+    let groups = header_str(headers, "x-auth-groups")
+        .map(split_csv_header)
+        .unwrap_or_default();
+    let username = header_str(headers, "x-auth-user").map(str::to_string);
+    let email = header_str(headers, "x-auth-email").map(str::to_string);
+
+    let mut is_admin = groups.iter().any(|g| g == "encjson:role:admin");
+    let mut is_scoped = groups.iter().any(|g| g == "encjson:role:scoped");
+    let mut tenants = groups
+        .iter()
+        .filter_map(|g| g.strip_prefix("encjson:tenant:").map(str::to_string))
+        .collect::<Vec<_>>();
+
+    let principal = Principal {
+        auth_method: AuthMethod::TrustedProxyHeaders,
+        issuer: ISSUER_PROXY.to_string(),
+        kind: PrincipalKind::User,
+        subject: subject.clone(),
+        groups: groups.clone(),
+        scopes: Vec::new(),
+        audience: Vec::new(),
+        client_id: None,
+        email,
+        username,
+        namespace: None,
+        service_account: None,
+    };
+
+    if let Some(policy) = policy {
+        let grant = policy.evaluate(&principal);
+        is_admin = is_admin || grant.is_admin;
+        is_scoped = is_scoped || grant.is_scoped;
+        tenants.extend(grant.tenants);
+        tenants.sort();
+        tenants.dedup();
+    }
+
+    if !is_admin && !is_scoped {
+        return Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "role not allowed",
+        )));
+    }
+
+    Ok(AuthContext {
+        is_admin,
+        is_scoped,
+        tenants,
+        subject,
+        groups,
+        principal,
+    })
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn split_csv_header(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn validate_kube_service_account_claims(claims: &Claims) -> Result<(), Box<Response>> {
@@ -642,6 +732,66 @@ authz:
         assert!(ctx.is_scoped);
         assert_eq!(ctx.tenants, vec!["o2"]);
         assert_eq!(ctx.groups, Vec::<String>::new());
+    }
+
+    #[test]
+    fn proxy_headers_normalize_to_user_principal() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-auth-subject", "user-1".parse().unwrap());
+        headers.insert("x-auth-user", "mares".parse().unwrap());
+        headers.insert("x-auth-email", "mares@example.com".parse().unwrap());
+        headers.insert(
+            "x-auth-groups",
+            "encjson:role:scoped, encjson:tenant:o2".parse().unwrap(),
+        );
+
+        let ctx = auth_context_from_proxy_headers(None, &headers).unwrap();
+        assert!(!ctx.is_admin);
+        assert!(ctx.is_scoped);
+        assert_eq!(ctx.tenants, vec!["o2"]);
+        assert_eq!(ctx.subject.as_deref(), Some("user-1"));
+        assert_eq!(ctx.principal.auth_method, AuthMethod::TrustedProxyHeaders);
+        assert_eq!(ctx.principal.issuer, ISSUER_PROXY);
+        assert_eq!(ctx.principal.kind, PrincipalKind::User);
+        assert_eq!(ctx.principal.username.as_deref(), Some("mares"));
+        assert_eq!(ctx.principal.email.as_deref(), Some("mares@example.com"));
+    }
+
+    #[test]
+    fn proxy_headers_can_be_authorized_by_local_policy() {
+        let policy = BearerAuthzPolicy::from_yaml(
+            r#"
+authz:
+  rules:
+    - principal:
+        issuer: proxy
+        groups:
+          - app:role:support
+      allow:
+        - keys:read
+      tenants:
+        - cetin
+"#,
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-auth-user", "support-user".parse().unwrap());
+        headers.insert("x-auth-groups", "app:role:support".parse().unwrap());
+
+        let ctx = auth_context_from_proxy_headers(Some(&policy), &headers).unwrap();
+        assert!(!ctx.is_admin);
+        assert!(ctx.is_scoped);
+        assert_eq!(ctx.tenants, vec!["cetin"]);
+        assert_eq!(ctx.groups, vec!["app:role:support"]);
+    }
+
+    #[test]
+    fn proxy_headers_without_role_are_forbidden() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-auth-user", "viewer".parse().unwrap());
+
+        let err = auth_context_from_proxy_headers(None, &headers).unwrap_err();
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]
