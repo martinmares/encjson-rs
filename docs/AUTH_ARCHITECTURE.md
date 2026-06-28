@@ -436,6 +436,20 @@ Services with backend plus frontend UI should support both:
 This makes the same service usable from browser, CLI, automation, and other
 services without forcing every user-facing app to implement its own OIDC login.
 
+Current `simple-oci-registry` implementation note:
+
+- keeps the OCI `/v2/*` Docker/registry token challenge flow as a protocol-specific
+  path
+- supports trusted proxy `X-Auth-*` headers for UI and REST API when SSO mode is
+  enabled
+- protects REST `/api/*` endpoints
+- accepts registry Bearer tokens issued by `/v2/auth` for REST API repository
+  operations
+- maps REST read operations to repository `pull`
+- maps REST write operations to repository `push`
+- requires trusted-proxy `registry:admin` identity for global REST operations
+  such as `/api/gc`
+
 ### simple-config-server / simple-artifacts-server / simple-deploy-server
 
 These services should follow the same pattern:
