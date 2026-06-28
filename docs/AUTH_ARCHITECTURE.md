@@ -444,8 +444,8 @@ Current `simple-oci-registry` implementation note:
 
 - keeps the OCI `/v2/*` Docker/registry token challenge flow as a protocol-specific
   path
-- supports trusted proxy `X-Auth-*` headers for UI and REST API when SSO mode is
-  enabled
+- supports trusted proxy `X-Auth-*` headers for UI and REST API when
+  `auth.trusted_proxy.enabled=true`
 - protects REST `/api/*` endpoints
 - accepts registry Bearer tokens issued by `/v2/auth` for REST API repository
   operations
