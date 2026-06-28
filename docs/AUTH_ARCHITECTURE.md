@@ -444,6 +444,14 @@ These services should follow the same pattern:
 - API endpoints should accept bearer tokens
 - service-specific authorization remains local
 
+Current `simple-config-server` implementation note:
+
+- supports opt-in trusted proxy headers through `auth.trusted_proxy.enabled`
+- supports Bearer JWT issuers through `auth.bearer.issuers`
+- supports `simple-idm-jwt` and `kube-sa-jwt`
+- validates Kubernetes ServiceAccount `sub` against namespace/serviceAccount claims
+- does not support legacy Basic Auth or `X-Client-Id` modes
+
 ## Implementation Order
 
 1. Keep this document as the architecture contract.
