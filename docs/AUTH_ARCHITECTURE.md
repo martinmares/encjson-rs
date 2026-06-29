@@ -235,6 +235,45 @@ X-Auth-Groups: encjson:role:scoped,encjson:tenant:o2
 
 `X-Auth-Groups` is comma-separated.
 
+## Web UI SSO Deployment Modes
+
+Backend services with browser UI should not each implement their own OIDC login
+flow by default. The default integration is:
+
+```text
+browser -> simple-idm-oauth2-proxy -> backend
+```
+
+`simple-idm-oauth2-proxy` owns the OIDC login flow, session cookie, callback,
+logout, stripping client-supplied `X-Auth-*` headers, and injecting trusted
+identity headers for the backend.
+
+For higher traffic, edge hardening, TLS termination, buffering, request limits,
+or organization-standard ingress requirements, deploy a standard proxy/ingress
+in front:
+
+```text
+browser -> nginx/Traefik/HAProxy/OpenShift Route -> simple-idm-oauth2-proxy -> backend
+```
+
+TLS termination is intentionally outside `simple-idm-oauth2-proxy`; it belongs
+to the edge proxy/ingress layer.
+
+`simple-idm-oauth2-proxy` supports two operational modes:
+
+- `auth_request`: nginx/ingress performs reverse proxying and asks
+  `simple-idm-oauth2-proxy` only for authentication decisions and headers.
+- `reverse_proxy`: `simple-idm-oauth2-proxy` performs the OIDC login flow and
+  forwards authenticated HTTP/1.1 and WebSocket traffic to one configured
+  upstream.
+
+The reverse proxy mode is not a general nginx/Traefik replacement. It is a
+single-upstream OIDC adapter for services that need unified SSO without embedding
+OIDC login code.
+
+Backend services may implement a native OAuth2/OIDC login flow only when there
+is a clear product or operational reason. This is an exception, not the default.
+
 ## Bearer Token Issuers
 
 Services that accept bearer tokens should support multiple configured issuers.
