@@ -296,7 +296,7 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = EncJsonApiVersion::V3_0)]
         api: EncJsonApiVersion,
 
-        /// Also create `env.secured.json` in current directory with generated public key
+        /// Also create `env.secured.json` in current directory with generated recipient metadata
         #[arg(long)]
         create_file: bool,
     },
@@ -2175,6 +2175,7 @@ fn cmd_init(keydir: Option<PathBuf>, api: EncJsonApiVersion, create_file: bool) 
         let bundle = generate_v3_key_bundle()?;
         let recipient = bundle.to_recipient_key();
         let path = save_v3_key_bundle(&bundle, keydir.as_deref())?;
+        let template = minimal_secured_template_v3(&recipient)?;
 
         println!("OK init");
         println!("  api       : 3.0");
@@ -2187,18 +2188,16 @@ fn cmd_init(keydir: Option<PathBuf>, api: EncJsonApiVersion, create_file: bool) 
             if out.exists() {
                 return Err(Error::FileAlreadyExists(out.display().to_string()));
             }
-            let template = serde_json::json!({
-                "_recipient_key": recipient,
-                "environment": {}
-            });
             fs::write(&out, serde_json::to_string_pretty(&template)?)?;
             println!("  created   : {}", out.display());
         }
+        print_minimal_secured_template(&template)?;
         return Ok(());
     }
 
     let (priv_hex, pub_hex) = generate_pair_consistent_key_pair();
     let path = save_private_key(&pub_hex, &priv_hex, keydir.as_deref())?;
+    let template = minimal_secured_template_v2(&pub_hex);
 
     println!("OK init");
     println!("  public key : {pub_hex}");
@@ -2210,14 +2209,34 @@ fn cmd_init(keydir: Option<PathBuf>, api: EncJsonApiVersion, create_file: bool) 
         if out.exists() {
             return Err(Error::FileAlreadyExists(out.display().to_string()));
         }
-        let template = serde_json::json!({
-            "_public_key": pub_hex,
-            "environment": {}
-        });
         fs::write(&out, serde_json::to_string_pretty(&template)?)?;
         println!("  created    : {}", out.display());
     }
+    print_minimal_secured_template(&template)?;
 
+    Ok(())
+}
+
+fn minimal_secured_template_v2(public_hex: &str) -> Value {
+    serde_json::json!({
+        "_public_key": public_hex,
+        "environment": {}
+    })
+}
+
+fn minimal_secured_template_v3(
+    recipient: &encjson_core::recipient::RecipientKeyV3,
+) -> Result<Value> {
+    Ok(serde_json::json!({
+        "_recipient_key": recipient,
+        "environment": {}
+    }))
+}
+
+fn print_minimal_secured_template(template: &Value) -> Result<()> {
+    println!();
+    println!("Minimal env.secured.json (copy/paste):");
+    println!("{}", serde_json::to_string_pretty(template)?);
     Ok(())
 }
 
@@ -2231,10 +2250,13 @@ fn cmd_encrypt(
     let effective_path = input.file.or(input.input);
 
     let mut value = read_json(effective_path.as_ref())?;
-    let legacy_api2 = matches!(
-        RecipientMetadata::parse(&value),
-        Ok(RecipientMetadata::LegacyPublicKey(_))
-    );
+    let upgraded_legacy_metadata_to_v3 =
+        upgrade_legacy_public_key_metadata_to_v3_if_possible(&mut value, ctx, true)?;
+    let legacy_api2 = !upgraded_legacy_metadata_to_v3
+        && matches!(
+            RecipientMetadata::parse(&value),
+            Ok(RecipientMetadata::LegacyPublicKey(_))
+        );
 
     let mut pair_mismatch = false;
     match resolve_json_crypto(&value, ctx)? {
@@ -2262,6 +2284,51 @@ fn cmd_encrypt(
             "Warning: legacy inconsistent key pair detected for _public_key; encryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`."
         );
     }
+    Ok(())
+}
+
+fn upgrade_legacy_public_key_metadata_to_v3_if_possible(
+    root: &mut Value,
+    ctx: &ResolveCtx<'_>,
+    warn: bool,
+) -> Result<bool> {
+    let Ok(RecipientMetadata::LegacyPublicKey(key_id)) = RecipientMetadata::parse(root) else {
+        return Ok(false);
+    };
+
+    match load_stored_key_material(&key_id, ctx.keydir.as_deref()) {
+        Ok(StoredKeyMaterial::V3Bundle(bundle)) => {
+            replace_root_metadata_with_recipient(root, &bundle.to_recipient_key())?;
+            if warn {
+                eprintln!(
+                    "Warning: `_public_key` referenced a local api=3.0 key bundle; upgraded JSON metadata to `_recipient_key`."
+                );
+            }
+            Ok(true)
+        }
+        Ok(StoredKeyMaterial::LegacyPrivateHex(_)) => Ok(false),
+        Err(Error::PrivateKeyNotFound(_)) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn replace_root_metadata_with_recipient(
+    root: &mut Value,
+    recipient: &encjson_core::recipient::RecipientKeyV3,
+) -> Result<()> {
+    let obj = root.as_object_mut().ok_or(Error::MissingEnvObject)?;
+    obj.remove("_public_key");
+    obj.remove("_recipient_key");
+
+    let mut reordered = serde_json::Map::new();
+    reordered.insert(
+        "_recipient_key".to_string(),
+        serde_json::to_value(recipient)?,
+    );
+    for (key, value) in std::mem::take(obj) {
+        reordered.insert(key, value);
+    }
+    *obj = reordered;
     Ok(())
 }
 
@@ -2296,7 +2363,8 @@ fn cmd_decrypt(
     // sjednotíme -f a pozicní argument (např. "-")
     let effective_path = input.file.or(input.input);
     let legacy_api2 = input_path_uses_legacy_api2(effective_path.as_ref())?;
-    let (value, pair_mismatch) = decrypt_json_with_sidecar(effective_path.as_ref(), ctx)?;
+    let (value, pair_mismatch, upgraded_legacy_metadata_to_v3) =
+        decrypt_json_with_sidecar(effective_path.as_ref(), ctx)?;
 
     if let Some(name) = env_name {
         let raw = get_env_value_raw(&value, &name)?;
@@ -2312,7 +2380,7 @@ fn cmd_decrypt(
     match output {
         OutputFormat::Json => {
             write_json_to(effective_path.as_ref(), write, &value)?;
-            if legacy_api2 && warn_pair_mismatch {
+            if legacy_api2 && !upgraded_legacy_metadata_to_v3 && warn_pair_mismatch {
                 print_legacy_api2_warning();
             }
             if pair_mismatch && warn_pair_mismatch {
@@ -2741,8 +2809,10 @@ fn get_env_value_raw(root: &Value, env_name: &str) -> Result<String> {
 fn decrypt_json_with_sidecar(
     effective_path: Option<&PathBuf>,
     ctx: &ResolveCtx<'_>,
-) -> Result<(Value, bool)> {
+) -> Result<(Value, bool, bool)> {
     let mut value = read_json(effective_path)?;
+    let upgraded_legacy_metadata_to_v3 =
+        upgrade_legacy_public_key_metadata_to_v3_if_possible(&mut value, ctx, false)?;
     let sidecar_schema = load_sidecar_schema(effective_path)?;
 
     let mut pair_mismatch = false;
@@ -2764,7 +2834,7 @@ fn decrypt_json_with_sidecar(
         apply_sidecar_schema(&mut value, schema)?;
     }
 
-    Ok((value, pair_mismatch))
+    Ok((value, pair_mismatch, upgraded_legacy_metadata_to_v3))
 }
 
 fn cmd_render_k8s_secret(
@@ -2782,7 +2852,8 @@ fn cmd_render_k8s_secret(
     } = opts;
     let effective_path = input.file.or(input.input);
     let legacy_api2 = input_path_uses_legacy_api2(effective_path.as_ref())?;
-    let (value, pair_mismatch) = decrypt_json_with_sidecar(effective_path.as_ref(), ctx)?;
+    let (value, pair_mismatch, upgraded_legacy_metadata_to_v3) =
+        decrypt_json_with_sidecar(effective_path.as_ref(), ctx)?;
 
     let env_obj = value
         .get("environment")
@@ -2816,7 +2887,7 @@ fn cmd_render_k8s_secret(
     } else {
         print!("{yaml}");
     }
-    if legacy_api2 {
+    if legacy_api2 && !upgraded_legacy_metadata_to_v3 {
         print_legacy_api2_warning();
     }
     if pair_mismatch {
@@ -4271,7 +4342,7 @@ mod tests {
                 .starts_with("EncJson[@api=3.0:@box=")
         );
 
-        let (decrypted, pair_mismatch) = decrypt_json_with_sidecar(
+        let (decrypted, pair_mismatch, _) = decrypt_json_with_sidecar(
             Some(&path),
             &ResolveCtx {
                 keydir: Some(key_dir.clone()),
@@ -4289,6 +4360,79 @@ mod tests {
                 .and_then(|v| v.get("APP_DB_PASSWORD"))
                 .and_then(Value::as_str),
             Some("new-secret")
+        );
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir_all(key_dir);
+    }
+
+    #[test]
+    fn cmd_encrypt_upgrades_legacy_public_key_metadata_when_it_points_to_v3_bundle() {
+        let key_dir = unique_path("encrypt-v3-legacy-metadata-keys", "");
+        fs::create_dir_all(&key_dir).unwrap();
+        let path = unique_path("encrypt-v3-legacy-metadata", ".secured.json");
+        let source_cfg = empty_source_cfg();
+
+        let bundle = encjson_core::crypto::generate_v3_key_bundle().unwrap();
+        let key_id = bundle.key_id.clone();
+        save_v3_key_bundle(&bundle, Some(&key_dir)).unwrap();
+
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "_public_key": key_id,
+                "environment": {
+                    "APP_DB_USER": "hello"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let ctx = ResolveCtx {
+            keydir: Some(key_dir.clone()),
+            private_key: None,
+            source_cfg: &source_cfg,
+            legacy_mode: true,
+        };
+
+        cmd_encrypt(
+            FileInput {
+                file: Some(path.clone()),
+                input: None,
+            },
+            true,
+            &ctx,
+            false,
+        )
+        .unwrap();
+
+        let encrypted: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(encrypted.get("_public_key").is_none());
+        assert_eq!(
+            encrypted
+                .get("_recipient_key")
+                .and_then(|v| v.get("key_id"))
+                .and_then(Value::as_str),
+            Some(key_id.as_str())
+        );
+        assert!(
+            encrypted
+                .get("environment")
+                .and_then(|v| v.get("APP_DB_USER"))
+                .and_then(Value::as_str)
+                .unwrap()
+                .starts_with("EncJson[@api=3.0:@box=")
+        );
+
+        let (decrypted, pair_mismatch, _) = decrypt_json_with_sidecar(Some(&path), &ctx).unwrap();
+        assert!(!pair_mismatch);
+        assert_eq!(
+            decrypted
+                .get("environment")
+                .and_then(|v| v.get("APP_DB_USER"))
+                .and_then(Value::as_str),
+            Some("hello")
         );
 
         let _ = fs::remove_file(path);
@@ -4454,7 +4598,7 @@ mod tests {
             Some("_recipient_key")
         );
 
-        let (decrypted, pair_mismatch) = decrypt_json_with_sidecar(
+        let (decrypted, pair_mismatch, _) = decrypt_json_with_sidecar(
             Some(&path),
             &ResolveCtx {
                 keydir: Some(dir.clone()),
@@ -4547,7 +4691,7 @@ mod tests {
             .unwrap();
         assert_eq!(new_key_id, target_key_id);
 
-        let (decrypted, pair_mismatch) = decrypt_json_with_sidecar(
+        let (decrypted, pair_mismatch, _) = decrypt_json_with_sidecar(
             Some(&path),
             &ResolveCtx {
                 keydir: Some(dir.clone()),
@@ -4589,10 +4733,35 @@ mod tests {
         let key_id = recipient.get("key_id").and_then(Value::as_str).unwrap();
         assert!(key_dir.join(key_id).exists());
         assert_eq!(recipient.get("version").and_then(Value::as_u64), Some(3));
+        assert_eq!(root.get("environment"), Some(&serde_json::json!({})));
 
         std::env::set_current_dir(prev_dir).unwrap();
         let _ = fs::remove_dir_all(work_dir);
         let _ = fs::remove_dir_all(key_dir);
+    }
+
+    #[test]
+    fn minimal_secured_templates_use_the_correct_api_metadata() {
+        let legacy = minimal_secured_template_v2(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        assert_eq!(
+            legacy.get("_public_key").and_then(Value::as_str),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert!(legacy.get("_recipient_key").is_none());
+        assert_eq!(legacy.get("environment"), Some(&serde_json::json!({})));
+
+        let bundle = encjson_core::crypto::generate_v3_key_bundle().unwrap();
+        let v3 = minimal_secured_template_v3(&bundle.to_recipient_key()).unwrap();
+        assert!(v3.get("_public_key").is_none());
+        assert_eq!(
+            v3.get("_recipient_key")
+                .and_then(|recipient| recipient.get("version"))
+                .and_then(Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(v3.get("environment"), Some(&serde_json::json!({})));
     }
 
     #[test]
@@ -4803,7 +4972,7 @@ mod tests {
                 .starts_with("EncJson[@api=3.0:@box=")
         );
 
-        let (decrypted, pair_mismatch) = decrypt_json_with_sidecar(
+        let (decrypted, pair_mismatch, _) = decrypt_json_with_sidecar(
             Some(&path),
             &ResolveCtx {
                 keydir: Some(key_dir.clone()),

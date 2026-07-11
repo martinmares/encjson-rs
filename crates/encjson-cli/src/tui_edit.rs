@@ -22,9 +22,10 @@ use time::format_description::parse;
 use time::{OffsetDateTime, UtcOffset};
 use unicode_width::UnicodeWidthChar;
 
-use encjson_core::crypto::SecureBox;
+use encjson_core::crypto::{HybridSecureBox, SecureBox};
 use encjson_core::error::Error;
-use encjson_core::key_store::load_private_key;
+use encjson_core::key_store::{load_private_key, load_v3_key_bundle};
+use encjson_core::recipient::RecipientMetadata;
 
 #[derive(Debug)]
 struct Entry {
@@ -71,8 +72,29 @@ struct SaveContext<'a> {
     root: &'a mut Value,
     env_key: String,
     original_env: &'a mut serde_json::Map<String, Value>,
-    sb: &'a Option<SecureBox>,
+    crypto: &'a Option<EditCrypto>,
     path: &'a Path,
+}
+
+enum EditCrypto {
+    Legacy(SecureBox),
+    V3(HybridSecureBox),
+}
+
+impl EditCrypto {
+    fn encrypt_value(&self, value: &str) -> Result<String, Error> {
+        match self {
+            Self::Legacy(sb) => Ok(sb.encrypt_value(value)?),
+            Self::V3(sb) => Ok(sb.encrypt_value(value)?),
+        }
+    }
+
+    fn decrypt_value(&self, value: &str) -> Result<String, Error> {
+        match self {
+            Self::Legacy(sb) => Ok(sb.decrypt_value(value)?),
+            Self::V3(sb) => Ok(sb.decrypt_value(value)?),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -102,21 +124,14 @@ pub fn run_edit_ui(path: &Path, keydir: Option<PathBuf>) -> Result<(), Error> {
         .ok_or(Error::MissingEnvObject)?;
     let mut original_env = env_obj.clone();
 
-    let sb = match crate::extract_public_key(&root) {
-        Ok(public_key_hex) => {
-            let private_key_hex = load_private_key(public_key_hex, keydir.as_deref(), None)?;
-            Some(SecureBox::new_from_hex(&private_key_hex, public_key_hex)?)
-        }
-        Err(Error::MissingPublicKey) => None,
-        Err(e) => return Err(e),
-    };
+    let crypto = load_edit_crypto(&root, keydir.as_deref())?;
 
     let mut entries = Vec::with_capacity(env_obj.len());
     let mut original = HashMap::with_capacity(env_obj.len());
     for (key, value) in env_obj.iter() {
         let display = match value {
-            Value::String(s) => match sb.as_ref() {
-                Some(sb) => sb.decrypt_value(s)?,
+            Value::String(s) => match crypto.as_ref() {
+                Some(crypto) => crypto.decrypt_value(s)?,
                 None => s.clone(),
             },
             other => other.to_string(),
@@ -153,7 +168,7 @@ pub fn run_edit_ui(path: &Path, keydir: Option<PathBuf>) -> Result<(), Error> {
         root: &mut root,
         env_key: env_key.to_string(),
         original_env: &mut original_env,
-        sb: &sb,
+        crypto: &crypto,
         path,
     };
     let action = run_ui(&mut app, &mut ctx)?;
@@ -163,6 +178,24 @@ pub fn run_edit_ui(path: &Path, keydir: Option<PathBuf>) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+fn load_edit_crypto(root: &Value, keydir: Option<&Path>) -> Result<Option<EditCrypto>, Error> {
+    Ok(match RecipientMetadata::parse(root) {
+        Ok(RecipientMetadata::LegacyPublicKey(public_key_hex)) => {
+            let private_key_hex = load_private_key(&public_key_hex, keydir, None)?;
+            Some(EditCrypto::Legacy(SecureBox::new_from_hex(
+                &private_key_hex,
+                &public_key_hex,
+            )?))
+        }
+        Ok(RecipientMetadata::RecipientKeyV3(recipient)) => {
+            let bundle = load_v3_key_bundle(&recipient.key_id, keydir)?;
+            Some(EditCrypto::V3(HybridSecureBox::from_bundle(bundle)))
+        }
+        Err(Error::MissingRecipientMetadata) => None,
+        Err(e) => return Err(e),
+    })
 }
 
 fn run_ui(app: &mut App, ctx: &mut SaveContext<'_>) -> Result<ExitAction, Error> {
@@ -1251,8 +1284,8 @@ fn apply_save(app: &mut App, ctx: &mut SaveContext<'_>) -> Result<(), Error> {
         let value = if entry.dirty {
             let parsed = parse_json_or_string(&entry.display);
             match parsed {
-                Value::String(s) => match ctx.sb.as_ref() {
-                    Some(sb) => Value::String(sb.encrypt_value(&s)?),
+                Value::String(s) => match ctx.crypto.as_ref() {
+                    Some(crypto) => Value::String(crypto.encrypt_value(&s)?),
                     None => Value::String(s),
                 },
                 other => other,
@@ -1360,4 +1393,38 @@ fn preview_scroll_offset(input: &str, cursor: usize, height: usize) -> usize {
     let byte_index = cursor_byte_index(input, cursor);
     let line_index = byte_index / 16;
     (line_index + 1).saturating_sub(height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use encjson_core::crypto::generate_v3_key_bundle;
+    use encjson_core::key_store::save_v3_key_bundle;
+
+    #[test]
+    fn edit_crypto_loads_and_roundtrips_api_v3_recipient_key() {
+        let key_dir = std::env::temp_dir().join(format!(
+            "encjson-tui-edit-v3-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&key_dir).unwrap();
+
+        let bundle = generate_v3_key_bundle().unwrap();
+        let recipient = bundle.to_recipient_key();
+        save_v3_key_bundle(&bundle, Some(&key_dir)).unwrap();
+        let root = serde_json::json!({
+            "_recipient_key": recipient,
+            "environment": { "APP_SECRET": "plaintext" }
+        });
+
+        let crypto = load_edit_crypto(&root, Some(&key_dir)).unwrap().unwrap();
+        let encrypted = crypto.encrypt_value("plaintext").unwrap();
+        assert!(encrypted.starts_with("EncJson[@api=3.0:@box="));
+        assert_eq!(crypto.decrypt_value(&encrypted).unwrap(), "plaintext");
+
+        let _ = fs::remove_dir_all(key_dir);
+    }
 }
