@@ -309,6 +309,33 @@ kube-sa-jwt
 
 `kube-sa-jwt` means Kubernetes/OpenShift projected ServiceAccount JWT.
 
+These issuer `kind` values are a cross-service contract. Keep the same names in
+all services that accept bearer tokens:
+
+- `simple-idm-jwt` for human, CLI, CI/CD, and M2M identities issued by
+  `simple-idm-server`.
+- `kube-sa-jwt` for Kubernetes/OpenShift workload identities based on projected
+  ServiceAccount tokens.
+
+Each service chooses its own `audience` and local policy model, but the issuer
+kind names and the basic token validation semantics stay the same.
+
+Examples:
+
+```text
+simple-config-server:
+  audience = simple-config-server
+  policy = tenant/env/scope grants
+
+encjson-keys-server:
+  audience = encjson-keys-server
+  policy = tenant/key read grants
+
+simple-vault-server:
+  audience = simple-vault-server
+  policy = tenant/scope/environment/release/render grants
+```
+
 ## Normalized Principal
 
 Every accepted authentication method must be normalized into one internal
@@ -567,6 +594,10 @@ Current `kube-edit-app` implementation note:
 7. [x] Add opt-in trusted proxy header normalization to `encjson-keys-server`.
 8. Reuse the same pattern in other services manually, without extracting a
    shared library too early.
+9. [ ] Keep `simple-idm-jwt` and `kube-sa-jwt` as the shared issuer kind names
+   in `encjson-keys-server`, `simple-config-server`, and `simple-vault-server`.
+10. [ ] Implement `kube-sa-jwt` policy support in `simple-vault-server` once its
+    API and policy model are ready.
 
 Current `kube-sa-jwt` implementation note:
 
@@ -584,3 +615,34 @@ central authorization server.
 Each binary should stay understandable and independently operable. Shared code
 can be reconsidered only after the model is proven stable in more than one
 service.
+
+## Open Follow-ups
+
+This is the current return plan after the first `simple-oci-registry` SSO rollout.
+
+1. [ ] Verify and commit the final `simple-oci-registry` SSO identity model:
+   - UI users authenticate only through `simple-idm-oauth2-proxy`.
+   - `X-Auth-Subject` is mandatory and stored as `(provider, subject)`.
+   - SSO-linked users cannot use local passwords for Docker/OCI login.
+   - Docker/OCI access stays on registry user passwords and service-account
+     tokens.
+   - SSO UI/API access stays based on current `registry:*` groups from IDM.
+2. [ ] Deploy and smoke-test `simple-oci-registry` with the new model:
+   - login/logout through SSO proxy
+   - account details showing trusted headers and provider/subject
+   - Docker `login`, `pull`, and `push` through registry credentials
+   - service-account token flow for CI/CD
+3. [ ] Finish `simple-idm-oauth2-proxy` production polish:
+   - reverse-proxy mode remains the default path for simple UI services
+   - HTTP/1.1 and WebSocket behavior must stay tested
+   - logout and standalone proxy pages use embedded Tabler assets
+4. [ ] Keep the service auth contract aligned across projects:
+   - UI services accept trusted `X-Auth-*` headers from the proxy
+   - API/backend services accept bearer JWT issuers where direct machine access
+     is needed
+   - no Basic Auth or `X-Client-Id` compatibility paths are reintroduced
+5. [ ] Continue validating the same pattern in the next services:
+   - `simple-config-server`
+   - `simple-artifacts-server`
+   - `kube-deploy-sync`
+   - `kube-edit-app`
