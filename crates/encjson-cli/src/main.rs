@@ -31,7 +31,7 @@ use encjson_core::key_store::{
     load_stored_key_material, load_v3_key_bundle, save_private_key, save_v3_key_bundle,
 };
 use encjson_core::oidc_session;
-use encjson_core::recipient::{PrivateBundle, PublicBundle, RecipientMetadata};
+use encjson_core::recipient::{LocalKeyFileV3, PrivateBundle, PublicBundle, RecipientMetadata};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -942,6 +942,25 @@ fn emit_warning(message: impl std::fmt::Display) {
     }
 }
 
+fn warn_legacy_mlkem_private_key(bundle: &LocalKeyFileV3) {
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&bundle.mlkem768.private_b64)
+    else {
+        return;
+    };
+
+    if bytes.len() == 2400 {
+        emit_warning(
+            "legacy ML-KEM expanded private key detected; run `encjson rotate-key -f <file> -w` to migrate to the seed format.",
+        );
+    }
+}
+
+fn load_v3_key_bundle_cli(key_id: &str, keydir: Option<&Path>) -> Result<LocalKeyFileV3> {
+    let bundle = load_v3_key_bundle(key_id, keydir)?;
+    warn_legacy_mlkem_private_key(&bundle);
+    Ok(bundle)
+}
+
 fn main() {
     let cli = Cli::parse();
     QUIET_WARNINGS.store(cli.quiet, Ordering::Relaxed);
@@ -1787,34 +1806,37 @@ fn build_register_payload_from_local_key(
                 tags,
             }))
         }
-        StoredKeyMaterial::V3Bundle(bundle) => Ok(RegisterPayload::V3(RegisterPayloadV3 {
-            key_id: bundle.key_id.clone(),
-            version: bundle.version,
-            algorithm: bundle.algorithm.clone(),
-            public_bundle: bundle.to_recipient_key().to_public_bundle(),
-            private_bundle: PrivateBundle {
-                version: bundle.version,
+        StoredKeyMaterial::V3Bundle(bundle) => {
+            warn_legacy_mlkem_private_key(&bundle);
+            Ok(RegisterPayload::V3(RegisterPayloadV3 {
                 key_id: bundle.key_id.clone(),
+                version: bundle.version,
                 algorithm: bundle.algorithm.clone(),
-                components: vec![
-                    encjson_core::recipient::KeyComponentPrivate {
-                        role: "kex".to_string(),
-                        algorithm: "x25519".to_string(),
-                        encoding: "hex".to_string(),
-                        private: bundle.x25519.private_hex.clone(),
-                    },
-                    encjson_core::recipient::KeyComponentPrivate {
-                        role: "kex".to_string(),
-                        algorithm: "ml-kem-768".to_string(),
-                        encoding: "base64".to_string(),
-                        private: bundle.mlkem768.private_b64.clone(),
-                    },
-                ],
-            },
-            tenant,
-            note,
-            tags,
-        })),
+                public_bundle: bundle.to_recipient_key().to_public_bundle(),
+                private_bundle: PrivateBundle {
+                    version: bundle.version,
+                    key_id: bundle.key_id.clone(),
+                    algorithm: bundle.algorithm.clone(),
+                    components: vec![
+                        encjson_core::recipient::KeyComponentPrivate {
+                            role: "kex".to_string(),
+                            algorithm: "x25519".to_string(),
+                            encoding: "hex".to_string(),
+                            private: bundle.x25519.private_hex.clone(),
+                        },
+                        encjson_core::recipient::KeyComponentPrivate {
+                            role: "kex".to_string(),
+                            algorithm: "ml-kem-768".to_string(),
+                            encoding: "base64".to_string(),
+                            private: bundle.mlkem768.private_b64.clone(),
+                        },
+                    ],
+                },
+                tenant,
+                note,
+                tags,
+            }))
+        }
     }
 }
 
@@ -2317,6 +2339,7 @@ fn upgrade_legacy_public_key_metadata_to_v3_if_possible(
 
     match load_stored_key_material(&key_id, ctx.keydir.as_deref()) {
         Ok(StoredKeyMaterial::V3Bundle(bundle)) => {
+            warn_legacy_mlkem_private_key(&bundle);
             replace_root_metadata_with_recipient(root, &bundle.to_recipient_key())?;
             if warn {
                 emit_warning(
@@ -2958,7 +2981,7 @@ fn cmd_render_k8s_pair_secret(
             }
         }
         RecipientMetadata::RecipientKeyV3(recipient) => {
-            let bundle = load_v3_key_bundle(&recipient.key_id, ctx.keydir.as_deref())?;
+            let bundle = load_v3_key_bundle_cli(&recipient.key_id, ctx.keydir.as_deref())?;
             let mut data = BTreeMap::new();
             data.insert("ENCJSON_KEY_VERSION".to_string(), encode_k8s_data("3"));
             data.insert(
@@ -3385,12 +3408,12 @@ fn cmd_rekey(
             Ok(())
         }
         RecipientMetadata::RecipientKeyV3(old_recipient) => {
-            let old_bundle = load_v3_key_bundle(&old_recipient.key_id, ctx.keydir.as_deref())?;
+            let old_bundle = load_v3_key_bundle_cli(&old_recipient.key_id, ctx.keydir.as_deref())?;
             let old_sb = HybridSecureBox::from_bundle(old_bundle);
             transform_json_v3(&mut root, &old_sb, TransformMode::Decrypt)?;
 
             let new_bundle = if let Some(key_id) = recipient_key_id {
-                load_v3_key_bundle(key_id, ctx.keydir.as_deref())?
+                load_v3_key_bundle_cli(key_id, ctx.keydir.as_deref())?
             } else {
                 generate_v3_key_bundle()?
             };
@@ -3466,7 +3489,7 @@ fn cmd_migrate_format(
 
     let generated_bundle;
     let new_bundle = if let Some(key_id) = recipient_key_id {
-        load_v3_key_bundle(key_id, ctx.keydir.as_deref())?
+        load_v3_key_bundle_cli(key_id, ctx.keydir.as_deref())?
     } else {
         generated_bundle = generate_v3_key_bundle()?;
         save_v3_key_bundle(&generated_bundle, ctx.keydir.as_deref())?;
@@ -3684,7 +3707,7 @@ fn resolve_json_crypto(root: &Value, ctx: &ResolveCtx<'_>) -> Result<ResolvedJso
             })
         }
         Ok(RecipientMetadata::RecipientKeyV3(recipient)) => {
-            let bundle = load_v3_key_bundle(&recipient.key_id, ctx.keydir.as_deref())?;
+            let bundle = load_v3_key_bundle_cli(&recipient.key_id, ctx.keydir.as_deref())?;
             Ok(ResolvedJsonCrypto::V3 {
                 sb: HybridSecureBox::from_bundle(bundle),
             })
