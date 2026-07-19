@@ -11,10 +11,12 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::tui_edit::run_edit_ui;
 use encjson_core::crypto::{
-    HybridSecureBox, SecureBox, generate_pair_consistent_key_pair, generate_v3_key_bundle,
+    HybridSecureBox, SecureBox, contains_api_version, generate_pair_consistent_key_pair,
+    generate_v3_key_bundle,
 };
 use encjson_core::error::Error;
 use encjson_core::json_utils::{
@@ -51,6 +53,14 @@ struct Cli {
     /// Print version and exit (like `encjson -v`)
     #[arg(short = 'v', long = "version")]
     version: bool,
+
+    /// Enable debug tracing on stderr.
+    #[arg(long, global = true)]
+    debug: bool,
+
+    /// Suppress all encjson warning messages on stderr.
+    #[arg(long = "quiet", global = true, env = "ENCJSON_QUIET")]
+    quiet: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -398,10 +408,6 @@ enum Commands {
         #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Json)]
         output: OutputFormat,
 
-        /// Print expansion trace to stderr (use RUST_LOG=debug to see it)
-        #[arg(long)]
-        debug: bool,
-
         /// Return only one concrete value from `environment` / `env` object (raw value to stdout)
         #[arg(long = "env-name", value_name = "NAME", conflicts_with = "write")]
         env_value_name: Option<String>,
@@ -430,10 +436,6 @@ enum Commands {
             help_heading = "Key Resolution"
         )]
         keydir: Option<PathBuf>,
-
-        /// Print expansion trace to stderr (use RUST_LOG=debug to see it)
-        #[arg(long)]
-        debug: bool,
     },
 
     /// Decrypt file and render Kubernetes Secret YAML (with optional sidecar schema transforms)
@@ -932,8 +934,20 @@ enum SessionsCommand {
     },
 }
 
+static QUIET_WARNINGS: AtomicBool = AtomicBool::new(false);
+
+fn emit_warning(message: impl std::fmt::Display) {
+    if !QUIET_WARNINGS.load(Ordering::Relaxed) {
+        eprintln!("Warning: {message}");
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
+    QUIET_WARNINGS.store(cli.quiet, Ordering::Relaxed);
+    if cli.debug {
+        init_tracing(true);
+    }
 
     // Support `encjson -v`
     if cli.version {
@@ -942,7 +956,7 @@ fn main() {
     }
 
     if let Some(cmd) = cli.command
-        && let Err(e) = run(cmd)
+        && let Err(e) = run(cmd, cli.debug)
     {
         eprintln!("Error: {e}");
         std::process::exit(1);
@@ -959,7 +973,7 @@ fn current_bin_name(default_name: &str) -> String {
         .unwrap_or_else(|| default_name.to_string())
 }
 
-fn run(command: Commands) -> Result<()> {
+fn run(command: Commands, debug: bool) -> Result<()> {
     match command {
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
@@ -1013,7 +1027,6 @@ fn run(command: Commands) -> Result<()> {
             write,
             keydir,
             output,
-            debug,
             env_value_name,
         } => {
             validate_scope_args(&resolve)?;
@@ -1038,7 +1051,6 @@ fn run(command: Commands) -> Result<()> {
             resolve,
             file,
             keydir,
-            debug,
         } => {
             validate_scope_args(&resolve)?;
             let source_cfg = source_cfg_from_resolve_args(&resolve);
@@ -1823,7 +1835,11 @@ fn cmd_info(input: FileInput, ctx: &ResolveCtx<'_>) -> Result<()> {
     let root = read_json(effective_path.as_ref())?;
     match RecipientMetadata::parse(&root)? {
         RecipientMetadata::LegacyPublicKey(public_key_hex) => {
-            print_legacy_api2_warning();
+            if contains_api_version(&root, "1.0") {
+                print_legacy_api1_warning();
+            } else {
+                print_legacy_api2_warning();
+            }
             let resolved = resolve_private_key_for_public(&public_key_hex, ctx)?;
             println!("metadata: legacy");
             println!("public_key: {public_key_hex}");
@@ -2252,16 +2268,12 @@ fn cmd_encrypt(
     let mut value = read_json(effective_path.as_ref())?;
     let upgraded_legacy_metadata_to_v3 =
         upgrade_legacy_public_key_metadata_to_v3_if_possible(&mut value, ctx, true)?;
-    let legacy_api2 = !upgraded_legacy_metadata_to_v3
-        && matches!(
-            RecipientMetadata::parse(&value),
-            Ok(RecipientMetadata::LegacyPublicKey(_))
-        );
+    let legacy_api2 = !upgraded_legacy_metadata_to_v3 && contains_api_version(&value, "2.0");
 
     let mut pair_mismatch = false;
     match resolve_json_crypto(&value, ctx)? {
         ResolvedJsonCrypto::None => {
-            eprintln!("Warning: no recipient metadata found in JSON, nothing encrypted");
+            emit_warning("no recipient metadata found in JSON, nothing encrypted");
         }
         ResolvedJsonCrypto::Legacy {
             sb,
@@ -2280,8 +2292,8 @@ fn cmd_encrypt(
         print_legacy_api2_warning();
     }
     if pair_mismatch && warn_pair_mismatch {
-        eprintln!(
-            "Warning: legacy inconsistent key pair detected for _public_key; encryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`."
+        emit_warning(
+            "legacy inconsistent key pair detected for _public_key; encryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`.",
         );
     }
     Ok(())
@@ -2296,12 +2308,19 @@ fn upgrade_legacy_public_key_metadata_to_v3_if_possible(
         return Ok(false);
     };
 
+    // API 1.0 and API 2.0 use different key derivation and wire formats. Do
+    // not replace API 1.0 metadata merely because a same-named local key file
+    // happens to contain a v3 bundle.
+    if contains_api_version(root, "1.0") {
+        return Ok(false);
+    }
+
     match load_stored_key_material(&key_id, ctx.keydir.as_deref()) {
         Ok(StoredKeyMaterial::V3Bundle(bundle)) => {
             replace_root_metadata_with_recipient(root, &bundle.to_recipient_key())?;
             if warn {
-                eprintln!(
-                    "Warning: `_public_key` referenced a local api=3.0 key bundle; upgraded JSON metadata to `_recipient_key`."
+                emit_warning(
+                    "`_public_key` referenced a local api=3.0 key bundle; upgraded JSON metadata to `_recipient_key`.",
                 );
             }
             Ok(true)
@@ -2342,7 +2361,7 @@ fn cmd_decrypt(
     warn_pair_mismatch: bool,
 ) -> Result<()> {
     if debug {
-        init_tracing();
+        init_tracing(true);
     }
 
     // `-w` dává smysl jen pro JSON výstup
@@ -2362,7 +2381,16 @@ fn cmd_decrypt(
 
     // sjednotíme -f a pozicní argument (např. "-")
     let effective_path = input.file.or(input.input);
-    let legacy_api2 = input_path_uses_legacy_api2(effective_path.as_ref())?;
+    if debug {
+        tracing::debug!(
+            path = ?effective_path,
+            output = ?output,
+            write,
+            env_name = env_name.as_deref(),
+            "encjson: decrypt"
+        );
+    }
+    let legacy_api2 = input_path_uses_api_version(effective_path.as_ref(), "2.0")?;
     let (value, pair_mismatch, upgraded_legacy_metadata_to_v3) =
         decrypt_json_with_sidecar(effective_path.as_ref(), ctx)?;
 
@@ -2370,8 +2398,8 @@ fn cmd_decrypt(
         let raw = get_env_value_raw(&value, &name)?;
         print!("{raw}");
         if pair_mismatch && warn_pair_mismatch {
-            eprintln!(
-                "Warning: legacy inconsistent key pair detected for _public_key; decryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`."
+            emit_warning(
+                "legacy inconsistent key pair detected for _public_key; decryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`.",
             );
         }
         return Ok(());
@@ -2384,8 +2412,8 @@ fn cmd_decrypt(
                 print_legacy_api2_warning();
             }
             if pair_mismatch && warn_pair_mismatch {
-                eprintln!(
-                    "Warning: legacy inconsistent key pair detected for _public_key; decryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`."
+                emit_warning(
+                    "legacy inconsistent key pair detected for _public_key; decryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`.",
                 );
             }
             Ok(())
@@ -2851,7 +2879,7 @@ fn cmd_render_k8s_secret(
         output,
     } = opts;
     let effective_path = input.file.or(input.input);
-    let legacy_api2 = input_path_uses_legacy_api2(effective_path.as_ref())?;
+    let legacy_api2 = input_path_uses_api_version(effective_path.as_ref(), "2.0")?;
     let (value, pair_mismatch, upgraded_legacy_metadata_to_v3) =
         decrypt_json_with_sidecar(effective_path.as_ref(), ctx)?;
 
@@ -2891,8 +2919,8 @@ fn cmd_render_k8s_secret(
         print_legacy_api2_warning();
     }
     if pair_mismatch {
-        eprintln!(
-            "Warning: legacy inconsistent key pair detected for _public_key; decryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`."
+        emit_warning(
+            "legacy inconsistent key pair detected for _public_key; decryption proceeded because ENCJSON_LEGACY_MODE=true. Run `encjson rotate-key -f <file> -w`.",
         );
     }
     Ok(())
@@ -2911,7 +2939,11 @@ fn cmd_render_k8s_pair_secret(
     let value = read_json(effective_path.as_ref())?;
     let manifest = match RecipientMetadata::parse(&value)? {
         RecipientMetadata::LegacyPublicKey(public_key) => {
-            print_legacy_api2_warning();
+            if contains_api_version(&value, "1.0") {
+                print_legacy_api1_warning();
+            } else {
+                print_legacy_api2_warning();
+            }
             let resolved = resolve_private_key_for_public(&public_key, ctx)?;
             let mut data = BTreeMap::new();
             data.insert(public_key_name, encode_k8s_data(&public_key));
@@ -3144,11 +3176,15 @@ fn parse_from_env_secret_mappings(items: &[String]) -> Result<Vec<(String, Strin
     Ok(out)
 }
 
-fn init_tracing() {
+fn init_tracing(force_debug: bool) {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
+        let filter = if force_debug {
+            tracing_subscriber::EnvFilter::new("debug")
+        } else {
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"))
+        };
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(std::io::stderr)
@@ -3188,10 +3224,7 @@ fn cmd_set(
 ) -> Result<()> {
     let effective_path = input.file.or(input.input);
     let mut root = read_json(effective_path.as_ref())?;
-    let legacy_api2 = matches!(
-        RecipientMetadata::parse(&root),
-        Ok(RecipientMetadata::LegacyPublicKey(_))
-    );
+    let legacy_api2 = contains_api_version(&root, "2.0");
 
     // Resolve env root key once (`environment` preferred, then `env`).
     let env_key = {
@@ -3253,10 +3286,7 @@ fn cmd_set(
 fn cmd_unset(input: FileInput, key: String, write: bool, ctx: &ResolveCtx<'_>) -> Result<()> {
     let effective_path = input.file.or(input.input);
     let mut root = read_json(effective_path.as_ref())?;
-    let legacy_api2 = matches!(
-        RecipientMetadata::parse(&root),
-        Ok(RecipientMetadata::LegacyPublicKey(_))
-    );
+    let legacy_api2 = contains_api_version(&root, "2.0");
 
     let env_key = {
         let obj = root.as_object().ok_or(Error::MissingEnvObject)?;
@@ -3418,8 +3448,21 @@ fn cmd_migrate_format(
 
     let old_public = extract_public_key(&root)?.to_string();
     let old_private = resolve_private_key_for_public(&old_public, ctx)?.private_hex;
-    let old_sb = SecureBox::new_from_hex(&old_private, &old_public)?;
-    transform_json(&mut root, &old_sb, TransformMode::Decrypt)?;
+    let from_api = if contains_api_version(&root, "1.0") {
+        if contains_api_version(&root, "2.0") {
+            return Err(Error::Http(
+                "mixed EncJson api=1.0 and api=2.0 values are not supported in one file"
+                    .to_string(),
+            ));
+        }
+        let old_sb = SecureBox::new_api1_from_hex(&old_private, &old_public)?;
+        transform_json(&mut root, &old_sb, TransformMode::Decrypt)?;
+        "1.0"
+    } else {
+        let old_sb = SecureBox::new_from_hex(&old_private, &old_public)?;
+        transform_json(&mut root, &old_sb, TransformMode::Decrypt)?;
+        "2.0"
+    };
 
     let generated_bundle;
     let new_bundle = if let Some(key_id) = recipient_key_id {
@@ -3453,7 +3496,7 @@ fn cmd_migrate_format(
         .unwrap_or_else(|| "stdin/stdout".to_string());
     println!("OK migrate-format");
     println!("  target file: {target}");
-    println!("  from api   : 2.0");
+    println!("  from api   : {from_api}");
     println!("  to api     : 3.0");
     println!("  old public : {old_public}");
     println!("  recipient  : {}", new_recipient.key_id);
@@ -3621,8 +3664,20 @@ enum ResolvedJsonCrypto {
 fn resolve_json_crypto(root: &Value, ctx: &ResolveCtx<'_>) -> Result<ResolvedJsonCrypto> {
     match RecipientMetadata::parse(root) {
         Ok(RecipientMetadata::LegacyPublicKey(public_key_hex)) => {
+            let api1 = contains_api_version(root, "1.0");
+            let api2 = contains_api_version(root, "2.0");
+            if api1 && api2 {
+                return Err(Error::Http(
+                    "mixed EncJson api=1.0 and api=2.0 values are not supported in one file"
+                        .to_string(),
+                ));
+            }
             let resolved = resolve_private_key_for_public(&public_key_hex, ctx)?;
-            let sb = SecureBox::new_from_hex(&resolved.private_hex, &public_key_hex)?;
+            let sb = if api1 {
+                SecureBox::new_api1_from_hex(&resolved.private_hex, &public_key_hex)?
+            } else {
+                SecureBox::new_from_hex(&resolved.private_hex, &public_key_hex)?
+            };
             Ok(ResolvedJsonCrypto::Legacy {
                 sb,
                 pair_mismatch: !resolved.pair_consistent,
@@ -3639,7 +3694,7 @@ fn resolve_json_crypto(root: &Value, ctx: &ResolveCtx<'_>) -> Result<ResolvedJso
     }
 }
 
-fn input_path_uses_legacy_api2(path: Option<&PathBuf>) -> Result<bool> {
+fn input_path_uses_api_version(path: Option<&PathBuf>, version: &str) -> Result<bool> {
     let Some(path) = path else {
         return Ok(false);
     };
@@ -3647,15 +3702,18 @@ fn input_path_uses_legacy_api2(path: Option<&PathBuf>) -> Result<bool> {
         return Ok(false);
     }
     let root = read_json(Some(path))?;
-    Ok(matches!(
-        RecipientMetadata::parse(&root),
-        Ok(RecipientMetadata::LegacyPublicKey(_))
-    ))
+    Ok(contains_api_version(&root, version))
+}
+
+fn print_legacy_api1_warning() {
+    emit_warning(
+        "legacy EncJson api=1.0 detected; migrate to api=3.0 with `encjson migrate-format -f <file> --to 3.0 -w`.",
+    );
 }
 
 fn print_legacy_api2_warning() {
-    eprintln!(
-        "Warning: legacy EncJson api=2.0 detected; migrate to api=3.0 with `encjson migrate-format -f <file> --to 3.0 -w`."
+    emit_warning(
+        "legacy EncJson api=2.0 detected; migrate to api=3.0 with `encjson migrate-format -f <file> --to 3.0 -w`.",
     );
 }
 

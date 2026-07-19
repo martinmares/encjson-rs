@@ -1,16 +1,20 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use blake2::{Blake2b512, Digest};
-use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20::cipher::{KeyIvInit, StreamCipher, consts::U16};
+use chacha20::{ChaCha20Legacy, Key as ChaChaKey, LegacyNonce, R20, hchacha};
+use chacha20poly1305::aead::{Aead, KeyInit as AeadKeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use lazy_static::lazy_static;
 use ml_kem::kem::{Decapsulate, Encapsulate};
 use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
+use poly1305::{Key as PolyKey, Poly1305};
 use rand::Rng;
 use rand_core::OsRng;
 use regex::Regex;
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -25,6 +29,25 @@ const API_VERSION_V3: &str = "3.0";
 const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
 const MAC_LEN: usize = 16; // Poly1305 tag length
+
+/// Return whether a JSON value contains an EncJson envelope for `version`.
+/// Metadata alone does not identify the legacy crypto variant because API
+/// 1.0 and API 2.0 both use `_public_key`.
+pub fn contains_api_version(value: &serde_json::Value, version: &str) -> bool {
+    match value {
+        serde_json::Value::String(s) => s
+            .strip_prefix("EncJson[@api=")
+            .and_then(|rest| rest.split_once(":@box="))
+            .is_some_and(|(v, _)| v.eq_ignore_ascii_case(version)),
+        serde_json::Value::Array(items) => {
+            items.iter().any(|item| contains_api_version(item, version))
+        }
+        serde_json::Value::Object(map) => {
+            map.values().any(|item| contains_api_version(item, version))
+        }
+        _ => false,
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum CryptoError {
@@ -49,6 +72,13 @@ pub enum CryptoError {
 /// Symmetric "box" derived from a static X25519 keypair.
 pub struct SecureBox {
     key: [u8; KEY_LEN],
+    api_version: LegacyApiVersion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyApiVersion {
+    Api1,
+    Api2,
 }
 
 /// Hybrid v3 box derived from X25519 + ML-KEM-768 using HKDF-SHA256.
@@ -88,7 +118,46 @@ impl SecureBox {
         let mut key = [0u8; KEY_LEN];
         key.copy_from_slice(&digest[..KEY_LEN]);
 
-        Ok(SecureBox { key })
+        Ok(SecureBox {
+            key,
+            api_version: LegacyApiVersion::Api2,
+        })
+    }
+
+    /// Create the API 1.0-compatible box used by the original Crystal
+    /// implementation. Monocypher's `crypto_key_exchange` is X25519 followed
+    /// by HChaCha20 with a zero 16-byte input; it is not the BLAKE2b KDF used
+    /// by the Rust API 2.0 format.
+    pub fn new_api1_from_hex(private_hex: &str, public_hex: &str) -> Result<Self, CryptoError> {
+        let priv_vec = hex::decode(private_hex)?;
+        let pub_vec = hex::decode(public_hex)?;
+
+        if priv_vec.len() != KEY_LEN || pub_vec.len() != KEY_LEN {
+            return Err(CryptoError::Invalid(
+                "key length must be 32 bytes (64 hex chars)".into(),
+            ));
+        }
+
+        let mut priv_arr = [0u8; KEY_LEN];
+        let mut pub_arr = [0u8; KEY_LEN];
+        priv_arr.copy_from_slice(&priv_vec);
+        pub_arr.copy_from_slice(&pub_vec);
+
+        let secret = StaticSecret::from(priv_arr);
+        let public = PublicKey::from(pub_arr);
+        let shared = secret.diffie_hellman(&public);
+
+        let zero = [0u8; 16];
+        let key_input = ChaChaKey::try_from(shared.as_bytes().as_slice())
+            .map_err(|_| CryptoError::Invalid("invalid X25519 shared key length".into()))?;
+        let key = hchacha::<R20>(&key_input, &zero.into());
+        let mut key_bytes = [0u8; KEY_LEN];
+        key_bytes.copy_from_slice(key.as_ref());
+
+        Ok(SecureBox {
+            key: key_bytes,
+            api_version: LegacyApiVersion::Api1,
+        })
     }
 
     /// Returns true if the string is in EncJson[@api=...:@box=...] format.
@@ -129,33 +198,45 @@ impl SecureBox {
         let mut rng = rand::rng();
         rng.fill_bytes(&mut nonce_bytes);
 
-        let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
-            .map_err(|_| CryptoError::Invalid("invalid key length".into()))?;
-        let nonce = XNonce::from_slice(&nonce_bytes);
-
-        // ciphertext || tag (Poly1305, 16 bytes)
-        let mut ct_and_tag = cipher
-            .encrypt(nonce, plaintext)
-            .map_err(|_| CryptoError::Invalid("encryption failed".into()))?;
-
-        if ct_and_tag.len() < MAC_LEN {
-            return Err(CryptoError::Invalid(
-                "ciphertext too short (missing tag)".into(),
-            ));
-        }
-
-        // Split into ciphertext and tag to keep the layout: nonce || ciphertext || mac
-        let tag = ct_and_tag.split_off(ct_and_tag.len() - MAC_LEN);
-        let ct = ct_and_tag;
+        let (ct, tag) = match self.api_version {
+            LegacyApiVersion::Api1 => api1_encrypt(&self.key, &nonce_bytes, plaintext)?,
+            LegacyApiVersion::Api2 => {
+                let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
+                    .map_err(|_| CryptoError::Invalid("invalid key length".into()))?;
+                let nonce = XNonce::from_slice(&nonce_bytes);
+                let mut ct_and_tag = cipher
+                    .encrypt(nonce, plaintext)
+                    .map_err(|_| CryptoError::Invalid("encryption failed".into()))?;
+                if ct_and_tag.len() < MAC_LEN {
+                    return Err(CryptoError::Invalid(
+                        "ciphertext too short (missing tag)".into(),
+                    ));
+                }
+                let tag = ct_and_tag.split_off(ct_and_tag.len() - MAC_LEN);
+                (ct_and_tag, tag)
+            }
+        };
 
         let mut buf = Vec::with_capacity(NONCE_LEN + ct.len() + MAC_LEN);
         buf.extend_from_slice(&nonce_bytes);
-        buf.extend_from_slice(&ct);
-        buf.extend_from_slice(&tag);
+        match self.api_version {
+            LegacyApiVersion::Api1 => {
+                buf.extend_from_slice(&tag);
+                buf.extend_from_slice(&ct);
+            }
+            LegacyApiVersion::Api2 => {
+                buf.extend_from_slice(&ct);
+                buf.extend_from_slice(&tag);
+            }
+        }
 
         let b64 = B64.encode(&buf);
 
-        Ok(format!("EncJson[@api={}:@box={}]", API_VERSION, b64))
+        let api = match self.api_version {
+            LegacyApiVersion::Api1 => "1.0",
+            LegacyApiVersion::Api2 => API_VERSION,
+        };
+        Ok(format!("EncJson[@api={}:@box={}]", api, b64))
     }
 
     /// Decrypts a value. If it is not in EncJson[...] format, returns the original string.
@@ -174,24 +255,123 @@ impl SecureBox {
         }
 
         let nonce_slice = &bytes[..NONCE_LEN];
-        let cipher_slice = &bytes[NONCE_LEN..bytes.len() - MAC_LEN];
-        let tag_slice = &bytes[bytes.len() - MAC_LEN..];
+        let (cipher_slice, tag_slice) = match self.api_version {
+            LegacyApiVersion::Api1 => (
+                &bytes[NONCE_LEN + MAC_LEN..],
+                &bytes[NONCE_LEN..NONCE_LEN + MAC_LEN],
+            ),
+            LegacyApiVersion::Api2 => (
+                &bytes[NONCE_LEN..bytes.len() - MAC_LEN],
+                &bytes[bytes.len() - MAC_LEN..],
+            ),
+        };
 
-        let mut ct_and_tag = Vec::with_capacity(cipher_slice.len() + MAC_LEN);
-        ct_and_tag.extend_from_slice(cipher_slice);
-        ct_and_tag.extend_from_slice(tag_slice);
+        let plain_bytes = match self.api_version {
+            LegacyApiVersion::Api1 => {
+                api1_decrypt(&self.key, nonce_slice, tag_slice, cipher_slice)?
+            }
+            LegacyApiVersion::Api2 => {
+                let mut ct_and_tag = Vec::with_capacity(cipher_slice.len() + MAC_LEN);
+                ct_and_tag.extend_from_slice(cipher_slice);
+                ct_and_tag.extend_from_slice(tag_slice);
 
-        let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
-            .map_err(|_| CryptoError::Invalid("invalid key length".into()))?;
-        let nonce = XNonce::from_slice(nonce_slice);
-
-        let plain_bytes = cipher
-            .decrypt(nonce, ct_and_tag.as_ref())
-            .map_err(|_| CryptoError::AeadDecrypt)?;
+                let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
+                    .map_err(|_| CryptoError::Invalid("invalid key length".into()))?;
+                let nonce = XNonce::from_slice(nonce_slice);
+                cipher
+                    .decrypt(nonce, ct_and_tag.as_ref())
+                    .map_err(|_| CryptoError::AeadDecrypt)?
+            }
+        };
 
         let s = String::from_utf8(plain_bytes)?;
         Ok(s)
     }
+}
+
+fn api1_chacha(key: &[u8; KEY_LEN], nonce: &[u8]) -> Result<ChaCha20Legacy, CryptoError> {
+    if nonce.len() != NONCE_LEN {
+        return Err(CryptoError::Invalid("invalid API 1.0 nonce length".into()));
+    }
+    let key = ChaChaKey::try_from(key.as_slice())
+        .map_err(|_| CryptoError::Invalid("invalid API 1.0 key length".into()))?;
+    let nonce16 = chacha20::cipher::Array::<u8, U16>::try_from(&nonce[..16])
+        .map_err(|_| CryptoError::Invalid("invalid API 1.0 nonce head length".into()))?;
+    let subkey = hchacha::<R20>(&key, &nonce16);
+    let subkey = ChaChaKey::try_from(subkey.as_ref())
+        .map_err(|_| CryptoError::Invalid("invalid API 1.0 subkey length".into()))?;
+    let nonce = LegacyNonce::try_from(&nonce[16..])
+        .map_err(|_| CryptoError::Invalid("invalid API 1.0 nonce tail length".into()))?;
+    Ok(ChaCha20Legacy::new(&subkey, &nonce))
+}
+
+fn api1_keystream_xor(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8],
+    input: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let mut cipher = api1_chacha(key, nonce)?;
+    let mut skip = [0u8; 64];
+    cipher.apply_keystream(&mut skip);
+    let mut output = input.to_vec();
+    cipher.apply_keystream(&mut output);
+    Ok(output)
+}
+
+fn api1_auth_key(key: &[u8; KEY_LEN], nonce: &[u8]) -> Result<[u8; 32], CryptoError> {
+    let mut cipher = api1_chacha(key, nonce)?;
+    let mut stream = [0u8; 64];
+    cipher.apply_keystream(&mut stream);
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&stream[..32]);
+    Ok(output)
+}
+
+fn api1_mac(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<[u8; MAC_LEN], CryptoError> {
+    let auth_key = api1_auth_key(key, nonce)?;
+    let poly_key = PolyKey::from_slice(&auth_key);
+    let poly = Poly1305::new(poly_key);
+
+    let mut input = Vec::with_capacity(ciphertext.len() + 32);
+    input.extend_from_slice(ciphertext);
+    input.resize(ciphertext.len() + ((16 - ciphertext.len() % 16) % 16), 0);
+    input.extend_from_slice(&0u64.to_le_bytes());
+    input.extend_from_slice(&(ciphertext.len() as u64).to_le_bytes());
+
+    let tag = poly.compute_unpadded(&input);
+    let mut output = [0u8; MAC_LEN];
+    output.copy_from_slice(tag.as_ref());
+    Ok(output)
+}
+
+fn api1_encrypt(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8],
+    plaintext: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
+    let ciphertext = api1_keystream_xor(key, nonce, plaintext)?;
+    let tag = api1_mac(key, nonce, &ciphertext)?;
+    Ok((ciphertext, tag.to_vec()))
+}
+
+fn api1_decrypt(
+    key: &[u8; KEY_LEN],
+    nonce: &[u8],
+    tag: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    if tag.len() != MAC_LEN {
+        return Err(CryptoError::Invalid("invalid API 1.0 MAC length".into()));
+    }
+    let expected = api1_mac(key, nonce, ciphertext)?;
+    if expected.as_slice().ct_eq(tag).unwrap_u8() != 1 {
+        return Err(CryptoError::AeadDecrypt);
+    }
+    api1_keystream_xor(key, nonce, ciphertext)
 }
 
 impl HybridSecureBox {
@@ -497,6 +677,34 @@ mod tests {
 
         let dec = sb.decrypt_value(&enc).unwrap();
         assert_eq!(dec, plain);
+    }
+
+    #[test]
+    fn api1_matches_monocypher_key_exchange_and_decrypts_crystal_output() {
+        let sb = SecureBox::new_api1_from_hex(
+            "5f5ade01649f59af5de9310fb967966e5c4715fff4ed8c41cd229a618f268872",
+            "f239af4eaf613180def4bef6b0e80a8f7c7506e8a3722d1b1a04239812221704",
+        )
+        .unwrap();
+
+        assert_eq!(
+            hex::encode(sb.key),
+            "91bda347e9e36b69dc8361f0642e94560b8ffdc5ffc085ce25a4ada1c3c26704"
+        );
+
+        let crystal_value = "EncJson[@api=1.0:@box=r1o6REcOQEmfSy4v9HG2CGHR6lmYpIwcsSuaDVabnvuHkKdpYo66lLcIuER0l1x+hXlcLaI=]";
+        assert_eq!(sb.decrypt_value(crystal_value).unwrap(), "hello API 1.0");
+
+        let crystal_unicode = "EncJson[@api=1.0:@box=JMY+y486optyhRWCuBhL04wTx5x/dV4nkM2Ij+Z1NYF/IqZb5G1dwqTinD/9DefzYDHIv+O77B3QEQ==]";
+        assert_eq!(sb.decrypt_value(crystal_unicode).unwrap(), "žluťoučký 🦀");
+    }
+
+    #[test]
+    fn api1_encrypts_with_legacy_marker_and_roundtrips() {
+        let sb = SecureBox::new_api1_from_hex(PRIVATE_KEY, PUBLIC_KEY).unwrap();
+        let encrypted = sb.encrypt_value("žluťoučký 🦀").unwrap();
+        assert!(encrypted.starts_with("EncJson[@api=1.0:@box="));
+        assert_eq!(sb.decrypt_value(&encrypted).unwrap(), "žluťoučký 🦀");
     }
 
     #[test]

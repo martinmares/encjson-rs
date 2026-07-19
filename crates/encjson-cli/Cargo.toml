@@ -1,14 +1,10 @@
 [package]
 name = "encjson-cli"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 
 [[bin]]
 name = "encjson"
-path = "src/main.rs"
-
-[[bin]]
-name = "encjson-rs"
 path = "src/main.rs"
 
 [dependencies]

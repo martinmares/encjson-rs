@@ -22,7 +22,7 @@ use time::format_description::parse;
 use time::{OffsetDateTime, UtcOffset};
 use unicode_width::UnicodeWidthChar;
 
-use encjson_core::crypto::{HybridSecureBox, SecureBox};
+use encjson_core::crypto::{HybridSecureBox, SecureBox, contains_api_version};
 use encjson_core::error::Error;
 use encjson_core::key_store::{load_private_key, load_v3_key_bundle};
 use encjson_core::recipient::RecipientMetadata;
@@ -184,10 +184,12 @@ fn load_edit_crypto(root: &Value, keydir: Option<&Path>) -> Result<Option<EditCr
     Ok(match RecipientMetadata::parse(root) {
         Ok(RecipientMetadata::LegacyPublicKey(public_key_hex)) => {
             let private_key_hex = load_private_key(&public_key_hex, keydir, None)?;
-            Some(EditCrypto::Legacy(SecureBox::new_from_hex(
-                &private_key_hex,
-                &public_key_hex,
-            )?))
+            let secure_box = if contains_api_version(root, "1.0") {
+                SecureBox::new_api1_from_hex(&private_key_hex, &public_key_hex)?
+            } else {
+                SecureBox::new_from_hex(&private_key_hex, &public_key_hex)?
+            };
+            Some(EditCrypto::Legacy(secure_box))
         }
         Ok(RecipientMetadata::RecipientKeyV3(recipient)) => {
             let bundle = load_v3_key_bundle(&recipient.key_id, keydir)?;

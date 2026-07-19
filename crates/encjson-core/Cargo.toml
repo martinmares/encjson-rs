@@ -9,6 +9,9 @@ axum = { workspace = true }
 base64 = { workspace = true }
 blake2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
+chacha20 = { workspace = true }
+poly1305 = { workspace = true }
+subtle = { workspace = true }
 chrono = { workspace = true }
 crossterm = { workspace = true }
 dirs = { workspace = true }

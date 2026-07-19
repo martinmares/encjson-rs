@@ -57,6 +57,12 @@ where the payload is a base64-encoded concatenation of:
 
 The symmetric key is derived from the public/private key pair using **X25519** + **BLAKE2b**, and encryption uses **XChaCha20-Poly1305** AEAD - all implemented in pure Rust (no C libraries).
 
+The Rust implementation also reads and writes the legacy Crystal-compatible
+`EncJson[@api=1.0:...]` format. API 1.0 uses the original Monocypher-compatible
+X25519/HChaCha20 construction and its historical `nonce || tag || ciphertext`
+layout. New files still default to API 3.0; API 1.0 is supported only for
+controlled compatibility and migration.
+
 ## Cryptography
 
 This section documents the cryptographic design in more detail.
@@ -1219,37 +1225,23 @@ Note: sessions and key files intentionally use different OS-standard locations:
 
 ## Migration from the Crystal version
 
-The original Crystal implementation and this Rust implementation use **different key derivation / encryption format** under the hood:
-
-- Crystal used `@api=1.0` with a Monocypher-based scheme.
-- This Rust implementation uses `@api=2.0` with X25519 + BLAKE2b + XChaCha20-Poly1305.
-
-Therefore:
-
-- **Old (`@api=1.0`) encrypted values cannot be decrypted by `encjson-rs`.**
-- **New (`@api=2.0`) encrypted values cannot be decrypted by the old Crystal tool.**
+The original Crystal implementation used `@api=1.0` with a pinned
+Monocypher fork. `encjson-rs` now implements that format natively in Rust, so
+the old Crystal binary is no longer required just to read existing files.
+The Rust tool also supports the later API 2.0 format, while new files default
+to API 3.0.
 
 Recommended migration path:
 
-1. Using the Crystal `encjson`:
-   - Decrypt your existing `env.secured.json` files:
-     ```bash
-     encjson decrypt -f env.secured.json -w
-     ```
-2. Using `encjson-rs`:
-   - Re-encrypt them:
-     ```bash
-     encjson encrypt -f env.secured.json -w
-     ```
-3. Commit the newly encrypted files into Git.
-4. Update your containers / scripts to use the Rust binary (`encjson-rs`) going forward.
+1. Verify that the matching legacy private key is available to `encjson-rs`.
+2. Migrate directly to the current format:
+   ```bash
+   encjson migrate-format -f env.secured.json --to 3.0 -w
+   ```
+3. Commit the newly encrypted file and deploy the matching API 3.0 key bundle.
 
-During migration, you can keep both binaries installed with different names, e.g.:
-
-- `/usr/bin/encjson-crystal`
-- `/usr/bin/encjson-rs`
-
-and choose which one to symlink as `encjson` based on an environment variable (e.g. in your entrypoint script).
+The Crystal binary can remain installed during a gradual rollout, but it is
+not needed by the Rust CLI for API 1.0 decryption or migration.
 
 ## Relationship to the Crystal project
 
