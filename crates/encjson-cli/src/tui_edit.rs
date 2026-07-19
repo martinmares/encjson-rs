@@ -19,7 +19,7 @@ use ratatui::widgets::{
     ScrollbarState,
 };
 use serde_json::Value;
-use time::format_description::parse;
+use time::format_description::parse_borrowed;
 use time::{OffsetDateTime, UtcOffset};
 use unicode_width::UnicodeWidthChar;
 
@@ -1072,11 +1072,11 @@ fn build_header(path: &Path) -> Result<String, Error> {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(dir)
     };
-    let fmt = parse(
+    let fmt = parse_borrowed::<3>(
         "[year]-[month]-[day] [hour]:[minute]:[second] [offset_hour sign:mandatory]:[offset_minute]",
     )
     .unwrap_or_else(|_| {
-        parse("[year]-[month]-[day] [hour]:[minute]:[second]").unwrap()
+        parse_borrowed::<3>("[year]-[month]-[day] [hour]:[minute]:[second]").unwrap()
     });
     let mtime = fs::metadata(path)
         .and_then(|m| m.modified())
