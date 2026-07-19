@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -66,6 +67,7 @@ struct App {
     order_changed: bool,
     request_save: bool,
     save_message: String,
+    saved_until: Option<Instant>,
 }
 
 struct SaveContext<'a> {
@@ -162,6 +164,7 @@ pub fn run_edit_ui(path: &Path, keydir: Option<PathBuf>) -> Result<(), Error> {
         order_changed: false,
         request_save: false,
         save_message: String::new(),
+        saved_until: None,
     };
 
     let mut ctx = SaveContext {
@@ -224,8 +227,19 @@ fn ui_loop(
     ctx: &mut SaveContext<'_>,
 ) -> Result<ExitAction, Error> {
     loop {
+        if app.mode == Mode::Saved
+            && app
+                .saved_until
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            app.mode = Mode::Normal;
+            app.saved_until = None;
+        }
         terminal.draw(|f| render_ui(f, app))?;
 
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
                 continue;
@@ -250,6 +264,7 @@ fn ui_loop(
                     app.save_message = "No changes".to_string();
                 }
                 app.mode = Mode::Saved;
+                app.saved_until = Some(Instant::now() + Duration::from_millis(1200));
             }
             if let Some(action) = exit {
                 return Ok(action);
@@ -508,9 +523,9 @@ fn handle_rename_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
 
 fn handle_confirm_mode(app: &mut App, key: KeyEvent) -> Option<ExitAction> {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => return Some(ExitAction::Save),
-        KeyCode::Char('n') | KeyCode::Char('N') => return Some(ExitAction::Discard),
-        KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+        KeyCode::Enter => return Some(ExitAction::Save),
+        KeyCode::Char('d') | KeyCode::Char('D') => return Some(ExitAction::Discard),
+        KeyCode::Esc => {
             app.mode = Mode::Normal;
         }
         _ => {}
@@ -633,8 +648,8 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
         Mode::AddKey => "New key | Enter confirm | Esc cancel",
         Mode::RenameKey => "Rename key | Enter confirm | Esc cancel",
         Mode::Diff => "Diff view | Up/Down scroll | q/Esc close",
-        Mode::Saved => "Saved | Enter/Esc to continue",
-        Mode::ConfirmExit => "Save changes? y/n/c",
+        Mode::Saved => "Saved",
+        Mode::ConfirmExit => "Enter save | d discard | Esc cancel",
         Mode::ConfirmDelete => "Delete key? y/n/c",
     };
     let status_line = if let Some(entry) = selected_entry(app) {
@@ -663,11 +678,11 @@ fn render_ui(f: &mut ratatui::Frame<'_>, app: &App) {
             .borders(Borders::ALL)
             .style(Style::default().fg(Color::Yellow));
         let text = Line::from(vec![
-            Span::styled("y", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" save  "),
-            Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" discard  "),
-            Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" cancel"),
         ]);
         let paragraph = Paragraph::new(text)
