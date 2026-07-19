@@ -147,11 +147,7 @@ impl PolicyBinding {
                         grant.is_scoped = true;
                     }
                 }
-                "requests" => {
-                    if permission.has_action("create") {
-                        grant.is_scoped = true;
-                    }
-                }
+                "requests" if permission.has_action("create") => grant.is_scoped = true,
                 _ => {}
             }
             if !permission.tenants.is_empty() {

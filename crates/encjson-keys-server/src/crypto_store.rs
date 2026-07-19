@@ -1,7 +1,6 @@
-use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::{
-    AeadCore, Aes256Gcm, KeyInit,
-    aead::{Aead, OsRng},
+    Aes256Gcm, KeyInit,
+    aead::{Aead, Generate, Nonce},
 };
 use base64::Engine;
 use rand::Rng;
@@ -31,7 +30,7 @@ pub(crate) fn random_token() -> String {
 pub(crate) fn encrypt_private_hex(secret: &str, plaintext: &str) -> anyhow::Result<String> {
     let key = encryption_key(secret);
     let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let nonce = Nonce::<Aes256Gcm>::generate();
     let ciphertext = cipher
         .encrypt(&nonce, plaintext.as_bytes())
         .map_err(|_| anyhow::anyhow!("encrypt failed"))?;
@@ -53,9 +52,10 @@ pub(crate) fn decrypt_private_hex(secret: &str, stored: &str) -> anyhow::Result<
         }
         let (nonce, ciphertext) = raw.split_at(12);
         let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
-        let nonce = GenericArray::from_slice(nonce);
+        let nonce =
+            Nonce::<Aes256Gcm>::try_from(nonce).map_err(|_| anyhow::anyhow!("decrypt failed"))?;
         let plaintext = cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|_| anyhow::anyhow!("decrypt failed"))?;
         return Ok(String::from_utf8(plaintext)?);
     }

@@ -7,11 +7,12 @@ use chacha20poly1305::aead::{Aead, KeyInit as AeadKeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use lazy_static::lazy_static;
-use ml_kem::kem::{Decapsulate, Encapsulate};
-use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
+#[allow(deprecated)]
+use ml_kem::ExpandedKeyEncoding;
+use ml_kem::kem::{Decapsulate, Encapsulate, Kem, KeyExport};
+use ml_kem::{ExpandedDecapsulationKey, MlKem768};
 use poly1305::{Key as PolyKey, Poly1305};
-use rand::Rng;
-use rand_core::OsRng;
+use rand_core::{Rng, UnwrapErr};
 use regex::Regex;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -203,7 +204,7 @@ impl SecureBox {
             LegacyApiVersion::Api2 => {
                 let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
                     .map_err(|_| CryptoError::Invalid("invalid key length".into()))?;
-                let nonce = XNonce::from_slice(&nonce_bytes);
+                let nonce = <&XNonce>::from(&nonce_bytes);
                 let mut ct_and_tag = cipher
                     .encrypt(nonce, plaintext)
                     .map_err(|_| CryptoError::Invalid("encryption failed".into()))?;
@@ -277,7 +278,10 @@ impl SecureBox {
 
                 let cipher = XChaCha20Poly1305::new_from_slice(&self.key)
                     .map_err(|_| CryptoError::Invalid("invalid key length".into()))?;
-                let nonce = XNonce::from_slice(nonce_slice);
+                let nonce_bytes: &[u8; NONCE_LEN] = nonce_slice
+                    .try_into()
+                    .map_err(|_| CryptoError::Invalid("invalid nonce length".into()))?;
+                let nonce = <&XNonce>::from(nonce_bytes);
                 cipher
                     .decrypt(nonce, ct_and_tag.as_ref())
                     .map_err(|_| CryptoError::AeadDecrypt)?
@@ -333,7 +337,7 @@ fn api1_mac(
     ciphertext: &[u8],
 ) -> Result<[u8; MAC_LEN], CryptoError> {
     let auth_key = api1_auth_key(key, nonce)?;
-    let poly_key = PolyKey::from_slice(&auth_key);
+    let poly_key = <&PolyKey>::from(&auth_key);
     let poly = Poly1305::new(poly_key);
 
     let mut input = Vec::with_capacity(ciphertext.len() + 32);
@@ -396,25 +400,23 @@ impl HybridSecureBox {
 
         let recipient_mlkem_public_bytes = B64.decode(recipient.mlkem768_public_b64)?;
         let recipient_mlkem_public_encoded =
-            ml_kem::Encoded::<<MlKem768 as KemCore>::EncapsulationKey>::try_from(
+            ml_kem::Key::<<MlKem768 as Kem>::EncapsulationKey>::try_from(
                 recipient_mlkem_public_bytes.as_slice(),
             )
             .map_err(|_| CryptoError::Invalid("invalid ML-KEM public key length".into()))?;
         let recipient_mlkem_public =
-            <MlKem768 as KemCore>::EncapsulationKey::from_bytes(&recipient_mlkem_public_encoded);
+            <MlKem768 as Kem>::EncapsulationKey::new(&recipient_mlkem_public_encoded)
+                .map_err(|_| CryptoError::Invalid("invalid ML-KEM public key".into()))?;
 
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(rand::rngs::SysRng);
 
         let mut eph_secret_bytes = [0u8; KEY_LEN];
-        use rand_core::RngCore;
         rng.fill_bytes(&mut eph_secret_bytes);
         let eph_secret = StaticSecret::from(eph_secret_bytes);
         let eph_public = PublicKey::from(&eph_secret);
         let x25519_shared = eph_secret.diffie_hellman(&recipient_x25519_public);
 
-        let (kem_ciphertext, kem_shared) = recipient_mlkem_public
-            .encapsulate(&mut rng)
-            .map_err(|_| CryptoError::Invalid("ML-KEM encapsulation failed".into()))?;
+        let (kem_ciphertext, kem_shared) = recipient_mlkem_public.encapsulate_with_rng(&mut rng);
 
         let key = derive_v3_key(
             x25519_shared.as_bytes(),
@@ -426,7 +428,7 @@ impl HybridSecureBox {
         rng.fill_bytes(&mut nonce_bytes);
         let cipher = XChaCha20Poly1305::new_from_slice(&key)
             .map_err(|_| CryptoError::Invalid("invalid derived key length".into()))?;
-        let nonce = XNonce::from_slice(&nonce_bytes);
+        let nonce = <&XNonce>::from(&nonce_bytes);
         let ciphertext = cipher
             .encrypt(nonce, plaintext)
             .map_err(|_| CryptoError::Invalid("encryption failed".into()))?;
@@ -491,17 +493,25 @@ impl HybridSecureBox {
             .map_err(|_| CryptoError::Invalid("invalid ML-KEM ciphertext length".into()))?;
 
         let decapsulation_key_bytes = B64.decode(&self.bundle.mlkem768.private_b64)?;
-        let decapsulation_key_encoded =
-            ml_kem::Encoded::<<MlKem768 as KemCore>::DecapsulationKey>::try_from(
-                decapsulation_key_bytes.as_slice(),
+        let decapsulation_key = if decapsulation_key_bytes.len() == 64 {
+            let seed = ml_kem::Seed::try_from(decapsulation_key_bytes.as_slice())
+                .map_err(|_| CryptoError::Invalid("invalid ML-KEM seed length".into()))?;
+            <MlKem768 as Kem>::DecapsulationKey::from_seed(seed)
+        } else {
+            let decapsulation_key_encoded =
+                ExpandedDecapsulationKey::<MlKem768>::try_from(decapsulation_key_bytes.as_slice())
+                    .map_err(|_| {
+                        CryptoError::Invalid("invalid ML-KEM private key length".into())
+                    })?;
+            #[allow(deprecated)]
+            let decapsulation_key = <MlKem768 as Kem>::DecapsulationKey::from_expanded_bytes(
+                &decapsulation_key_encoded,
             )
-            .map_err(|_| CryptoError::Invalid("invalid ML-KEM private key length".into()))?;
-        let decapsulation_key =
-            <MlKem768 as KemCore>::DecapsulationKey::from_bytes(&decapsulation_key_encoded);
+            .map_err(|_| CryptoError::Invalid("invalid ML-KEM private key".into()))?;
+            decapsulation_key
+        };
 
-        let kem_shared = decapsulation_key
-            .decapsulate(&kem_ciphertext)
-            .map_err(|_| CryptoError::Invalid("ML-KEM decapsulation failed".into()))?;
+        let kem_shared = decapsulation_key.decapsulate(&kem_ciphertext);
 
         let key = derive_v3_key(
             x25519_shared.as_bytes(),
@@ -514,7 +524,7 @@ impl HybridSecureBox {
             .as_slice()
             .try_into()
             .map_err(|_| CryptoError::Invalid("invalid v3 nonce length".into()))?;
-        let nonce = XNonce::from_slice(nonce_bytes);
+        let nonce = <&XNonce>::from(nonce_bytes);
         let ciphertext = B64.decode(envelope.ciphertext_b64)?;
 
         let cipher = XChaCha20Poly1305::new_from_slice(&key)
@@ -559,15 +569,14 @@ pub fn generate_pair_consistent_key_pair() -> (String, String) {
 }
 
 pub fn generate_v3_key_bundle() -> Result<LocalKeyFileV3, CryptoError> {
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(rand::rngs::SysRng);
 
     let mut x25519_private_bytes = [0u8; KEY_LEN];
-    use rand_core::RngCore;
     rng.fill_bytes(&mut x25519_private_bytes);
     let x25519_secret = StaticSecret::from(x25519_private_bytes);
     let x25519_public = PublicKey::from(&x25519_secret);
 
-    let (mlkem_private, mlkem_public) = MlKem768::generate(&mut rng);
+    let (mlkem_private, mlkem_public) = MlKem768::generate_keypair_from_rng(&mut rng);
 
     let mut public_bundle = PublicBundle {
         version: 3,
@@ -584,12 +593,17 @@ pub fn generate_v3_key_bundle() -> Result<LocalKeyFileV3, CryptoError> {
                 role: "kex".to_string(),
                 algorithm: "ml-kem-768".to_string(),
                 encoding: "base64".to_string(),
-                public: B64.encode(mlkem_public.as_bytes().as_slice()),
+                public: B64.encode(mlkem_public.to_bytes().as_slice()),
             },
         ],
     };
     let key_id = compute_key_id(&public_bundle).map_err(|e| CryptoError::Invalid(e.to_string()))?;
     public_bundle.key_id = key_id.clone();
+
+    let mlkem_private_seed = mlkem_private
+        .to_seed()
+        .ok_or_else(|| CryptoError::Invalid("generated ML-KEM key has no seed".into()))?;
+    let mlkem_private_b64 = B64.encode(mlkem_private_seed.as_slice());
 
     let _private_bundle = PrivateBundle {
         version: 3,
@@ -606,7 +620,7 @@ pub fn generate_v3_key_bundle() -> Result<LocalKeyFileV3, CryptoError> {
                 role: "kex".to_string(),
                 algorithm: "ml-kem-768".to_string(),
                 encoding: "base64".to_string(),
-                private: B64.encode(mlkem_private.as_bytes().as_slice()),
+                private: mlkem_private_b64.clone(),
             },
         ],
     };
@@ -622,7 +636,7 @@ pub fn generate_v3_key_bundle() -> Result<LocalKeyFileV3, CryptoError> {
         },
         mlkem768: LocalMlKem768Keypair {
             public_b64: public_bundle.components[1].public.clone(),
-            private_b64: B64.encode(mlkem_private.as_bytes().as_slice()),
+            private_b64: mlkem_private_b64,
         },
     })
 }
@@ -739,7 +753,42 @@ mod tests {
         assert_eq!(bundle.x25519.public_hex.len(), 64);
         assert_eq!(bundle.x25519.private_hex.len(), 64);
         assert!(!bundle.mlkem768.public_b64.is_empty());
-        assert!(!bundle.mlkem768.private_b64.is_empty());
+        assert_eq!(
+            B64_STD.decode(&bundle.mlkem768.private_b64).unwrap().len(),
+            64
+        );
+    }
+
+    #[test]
+    fn v3_decrypt_keeps_legacy_expanded_mlkem_private_key_compatibility() {
+        let bundle = generate_v3_key_bundle().unwrap();
+        let seed = ml_kem::Seed::try_from(
+            B64_STD
+                .decode(&bundle.mlkem768.private_b64)
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        let decapsulation_key = <MlKem768 as Kem>::DecapsulationKey::from_seed(seed);
+        #[allow(deprecated)]
+        let expanded = decapsulation_key.to_expanded_bytes();
+
+        let mut legacy_bundle = bundle.clone();
+        legacy_bundle.mlkem768.private_b64 = B64_STD.encode(expanded.as_slice());
+        assert_eq!(
+            B64_STD
+                .decode(&legacy_bundle.mlkem768.private_b64)
+                .unwrap()
+                .len(),
+            2400
+        );
+
+        let hybrid = HybridSecureBox::from_bundle(legacy_bundle);
+        let encrypted = hybrid.encrypt_value("legacy expanded key").unwrap();
+        assert_eq!(
+            hybrid.decrypt_value(&encrypted).unwrap(),
+            "legacy expanded key"
+        );
     }
 
     #[test]
