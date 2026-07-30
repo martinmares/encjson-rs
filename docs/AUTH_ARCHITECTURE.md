@@ -11,8 +11,14 @@ without introducing a central online authorization dependency for every request.
 This contract applies to services such as:
 
 - `encjson-keys-server`
+- `simple-idm-server`
+- `simple-idm-ad-proxy`
+- `simple-idm-oauth2-proxy`
 - `simple-oci-registry`
 - `simple-config-server`
+- `simple-vault-server`
+- `postgres-explorer`
+- `elastic-explorer`
 - `simple-artifacts-server`
 - `simple-deploy-server`
 - deployment/sync tools and related CLIs
@@ -22,16 +28,19 @@ the supported direction.
 
 ## Core Decision
 
-There are two supported authentication mechanisms:
+There are three supported authentication mechanisms:
 
-1. Bearer token authentication
+1. Signed Bearer JWT authentication
 2. Trusted proxy headers
+3. Local service tokens for explicitly configured same-host integrations
 
-These mechanisms are complementary.
+These mechanisms are complementary. A service implements only the mechanisms
+required by its deployment and API surface.
 
 ```text
-Bearer JWT token       = cryptographic trust in a signed token
-X-Auth-* headers       = topological trust in a protected proxy boundary
+Bearer JWT token          = cryptographic trust in a signed token
+X-Auth-* headers          = topological trust in a protected proxy boundary
+X-Simple-Service-Token    = scoped opaque credential inside one host trust zone
 ```
 
 `simple-idm-server` is the primary identity provider for humans, CLIs, GitLab,
@@ -190,6 +199,51 @@ zis-test/order-api
 Pod name must not be used as the authorization identity because it changes on
 rollout. Pod UID/name may be used only for audit logging.
 
+### 5. Same-Host Service to Service
+
+For a standalone host where both services run inside one controlled operating
+system trust boundary, requiring OAuth2/OIDC for every local bootstrap request
+can add more operational complexity than security value.
+
+The optional local model is:
+
+```text
+local caller service
+  -> direct loopback request to target service
+  -> X-Simple-Service-Token: <opaque random value>
+  -> target-local tenant and permission policy
+```
+
+The normalized issuer name is `local-service-token`.
+
+This is not an IP allowlist. Source IP alone is never an identity. Every caller
+has a random credential and an explicitly configured service name, tenant set
+and permission set.
+
+Required safeguards:
+
+- the target application listener is bound to a loopback address;
+- the caller connects directly to that listener, not through the public reverse
+  proxy route;
+- the token contains at least 256 bits of cryptographically random data;
+- the token is loaded from an absolute, access-controlled file and is never
+  stored in the application database;
+- the target stores only a digest in memory and compares it in constant time;
+- the reverse proxy always removes client-supplied
+  `X-Simple-Service-Token`;
+- the token maps to a named service principal and explicit local authorization
+  policy;
+- sensitive operations are audited without logging the token.
+
+On the current standalone systemd deployment, cooperating services run as the
+same dedicated Unix account and token files use mode `0600`. Services running
+under different Unix identities should use signed JWTs unless a deliberately
+scoped filesystem/ACL design is introduced.
+
+Do not use this mode across hosts, containers or cluster nodes, through an
+externally reachable reverse proxy, for browser sessions, or where workload
+identity, expiry, revocation or delegation is required.
+
 ## Trusted Proxy Header Rules
 
 Applications may trust `X-Auth-*` headers only if they are reachable exclusively
@@ -209,6 +263,10 @@ public traffic -> application
 
 The public edge must strip any client-supplied auth headers and set trusted
 headers only after successful authentication.
+
+The public edge must also strip `X-Simple-Service-Token`. That header belongs
+only to direct same-host requests and must never be forwarded from public
+traffic.
 
 Headers such as `X-Auth-Token` must not be forwarded by default. Forward a raw
 access token only when the downstream application explicitly needs delegated API
@@ -345,8 +403,8 @@ Conceptual structure:
 
 ```text
 Principal {
-  auth_method: bearer_token | trusted_proxy_headers
-  issuer: simple-idm-jwt | kube-sa-jwt | proxy
+  auth_method: bearer_token | trusted_proxy_headers | local_service_token
+  issuer: simple-idm-jwt | kube-sa-jwt | proxy | local-service-token
   kind: user | service | workload
   subject: string
   groups: [string]
@@ -381,6 +439,12 @@ OpenShift workload:
   subject = system:serviceaccount:zis-test:order-api
   namespace = zis-test
   service_account = order-api
+
+Standalone same-host service:
+  issuer = local-service-token
+  kind = service
+  subject = service:simple-config-server
+  client_id = simple-config-server
 ```
 
 ## Authorization Model
@@ -519,6 +583,8 @@ Current `simple-oci-registry` implementation note:
 - maps REST write operations to repository `push`
 - requires trusted-proxy `registry:admin` identity for global REST operations
   such as `/api/gc`
+- uses registry service/robot accounts for Docker/OCI machine access; do not add
+  `local-service-token` as a competing push/pull credential model
 
 ### simple-config-server / simple-artifacts-server / simple-deploy-server
 
@@ -535,6 +601,37 @@ Current `simple-config-server` implementation note:
 - supports `simple-idm-jwt` and `kube-sa-jwt`
 - validates Kubernetes ServiceAccount `sub` against namespace/serviceAccount claims
 - does not support legacy Basic Auth or `X-Client-Id` modes
+
+`local-service-token` may be added later for direct same-host config consumers.
+It is not needed for OpenShift applications, which use `kube-sa-jwt`.
+
+### simple-vault-server
+
+`simple-vault-server` supports:
+
+- trusted proxy `X-Auth-*` identity for its browser UI;
+- `simple-idm-jwt` and `kube-sa-jwt` for normal API access;
+- optional `local-service-token` for direct same-host bootstrap/export calls,
+  such as rendering a scoped dotenv file for `simple-config-server`.
+
+The local token is configured and authorized by `simple-vault-server`; it is
+not issued by `simple-idm-server`.
+
+### Projects that do not need local service tokens
+
+- `simple-idm-server` remains the JWT/OIDC issuer and does not consume local
+  service tokens for its normal protocol endpoints.
+- `simple-idm-ad-proxy` and `simple-idm-oauth2-proxy` authenticate humans and
+  produce trusted `X-Auth-*` identity; they do not issue or translate local
+  service tokens.
+- `postgres-explorer` and `elastic-explorer` are interactive support tools and
+  continue to use trusted proxy identity.
+- `simple-oci-registry` keeps its protocol-specific registry Bearer token and
+  service/robot account model for machine access.
+
+`encjson-keys-server` may add `local-service-token` only for a concrete
+same-host bootstrap use case. Its normal remote machine paths remain
+`simple-idm-jwt` and `kube-sa-jwt`.
 
 Current `simple-artifacts-server` implementation note:
 
