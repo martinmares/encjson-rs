@@ -244,6 +244,117 @@ Do not use this mode across hosts, containers or cluster nodes, through an
 externally reachable reverse proxy, for browser sessions, or where workload
 identity, expiry, revocation or delegation is required.
 
+### Named Outbound Value Sources
+
+When a service has a concrete need to refresh runtime values from another
+same-host service, use named outbound providers instead of embedding endpoint
+and credential details repeatedly in each environment block.
+
+The cross-service vocabulary is:
+
+```yaml
+value_sources:
+  local-vault:
+    provider: "simple-vault-server"
+    base_url: "http://127.0.0.1:8188/simple-vault-server"
+    auth:
+      kind: "local-service-token"
+      token_file: "/absolute/path/to/service-token"
+    refresh_interval_secs: 60
+    timeout_secs: 10
+
+tenants:
+  default:
+    environments:
+      dev:
+        env_source:
+          provider: "local-vault"
+          export_profile: "runtime-dotenv"
+          required: true
+```
+
+The initial implementation exists only in `simple-config-server`. It treats
+the structured resolved export as one atomic response and derives two snapshots
+from it: a complete runtime map and a diagnostic map containing only values
+classified as `anonymous` or `authenticated` and non-sensitive. Both snapshots are
+replaced together.
+The client retains the last known good pair after refresh failures, rereads the
+token file for token rotation, and requires the provider URL to target loopback
+when `local-service-token` is used.
+
+`simple-vault-server` export profiles are stable output contracts identified by
+a tenant-local slug. They define output names, mappings and format, but they do
+not own a scope, environment or release. The consuming environment supplies the
+runtime projection. Consequently, `simple-config-server` calls the contextual
+slug route directly:
+
+```text
+GET /api/v1/tenants/{tenant_slug}/environments/{environment_slug}/export-profiles/{profile_slug}/resolved-values
+```
+
+This protected endpoint returns values and their classification in a single
+JSON document. Dotenv comments are not authorization metadata. The consumer
+must reject duplicate names, unknown classifications, and any value marked both
+`anonymous` or `authenticated` and sensitive.
+
+Each resolved value carries two independent fields:
+
+| `exposure` | `sensitive` | Anonymous API | Diagnostics | Protected runtime |
+| --- | ---: | ---: | ---: | ---: |
+| `anonymous` | `false` | yes | yes | yes |
+| `authenticated` | `false` | no | yes | yes |
+| `private` | `false` | no | no | yes |
+| `private` | `true` | no | no | yes |
+
+`anonymous` or `authenticated` combined with `sensitive: true` is invalid and must
+fail closed. `exposure` classifies distribution; `sensitive` controls handling,
+redaction, and audit semantics. The `diagnostics:read` scope authorizes a
+client, while mapping exposure determines which values that client may receive.
+
+The tenant defaults to the enclosing Config Server tenant unless
+`env_source.tenant` overrides it; the environment always comes from the
+enclosing `tenants.<tenant>.environments.<environment>` branch. Export profile
+UUIDs are internal storage identifiers and are not part of this contract.
+
+The terms `value_sources`, `env_source`, `provider`, `auth.kind`,
+`token_file`, `refresh_interval_secs`, `timeout_secs`, and `required` are the
+preferred configuration vocabulary if another service later proves that it
+needs the same capability. Consistent vocabulary does not imply a shared
+runtime library: implement the small client independently in each binary only
+after a concrete use case exists. Do not add this block speculatively to every
+service and do not extract a shared crate prematurely.
+
+For `simple-config-server`, one environment may configure either its existing
+`env_file` or `env_source`, never both. The root-level `env_file` remains a
+separate baseline source and may still be combined with either environment
+choice.
+
+### Diagnostic Configuration Channel
+
+Operational diagnostics are a third channel, distinct from both browser UI and
+the full runtime API:
+
+```text
+simple-vault-server resolved-values
+        -> simple-config-server runtime + diagnostic snapshots
+        -> /api/v1/diagnostics/* with diagnostics:read
+```
+
+Diagnostic endpoints:
+
+```text
+GET /api/v1/diagnostics/tenants/{tenant}/envs/{env}/{application}/{profile}
+GET /api/v1/diagnostics/tenants/{tenant}/envs/{env}/{application}/{profile}/{label}
+```
+
+They always require a Bearer JWT with `diagnostics:read`; trusted proxy headers
+and auth-disabled sandbox behavior must not authorize this channel. Only
+non-sensitive `anonymous` and `authenticated` values are substituted. `private`
+values retain their normal `{{ PLACEHOLDER }}` syntax, so templates do not need
+separate public/private names. Responses use `Cache-Control: no-store` and
+report which variable names were resolved, redacted, or missing without logging
+their values.
+
 ## Trusted Proxy Header Rules
 
 Applications may trust `X-Auth-*` headers only if they are reachable exclusively
@@ -377,6 +488,28 @@ all services that accept bearer tokens:
 
 Each service chooses its own `audience` and local policy model, but the issuer
 kind names and the basic token validation semantics stay the same.
+
+Services with direct Kubernetes ServiceAccount policy mappings use this shared
+selector contract:
+
+```yaml
+kube_sa_policies:
+  - issuer_name: "production-okd"
+    namespace: "payments-production"
+    service_accounts: ["order-api", "invoice-api"]
+    # Service-specific grants follow, for example tenants/envs/scopes.
+```
+
+`issuer_name` binds the policy to one configured `kube-sa-jwt` issuer. The
+ServiceAccounts in one list share the same grant. Implementations must reject
+an unknown issuer, an empty namespace or list, duplicate names, empty names,
+and wildcard ServiceAccount selectors. Broad access belongs in explicit local
+resource grants, not in the identity selector.
+
+`encjson-keys-server` currently expresses the same identity relationship in
+its generic policy binding model. It does not need to copy the direct
+`kube_sa_policies` configuration shape used by `simple-config-server` and
+`simple-vault-server`.
 
 Examples:
 
@@ -601,9 +734,14 @@ Current `simple-config-server` implementation note:
 - supports `simple-idm-jwt` and `kube-sa-jwt`
 - validates Kubernetes ServiceAccount `sub` against namespace/serviceAccount claims
 - does not support legacy Basic Auth or `X-Client-Id` modes
+- supports named outbound `value_sources` with the
+  `simple-vault-server`/`local-service-token` combination for direct same-host
+  runtime value refresh
+- requires each environment to choose either `env_file` or `env_source`
 
-`local-service-token` may be added later for direct same-host config consumers.
-It is not needed for OpenShift applications, which use `kube-sa-jwt`.
+This outbound use does not make `local-service-token` a public authentication
+method of `simple-config-server`. OpenShift applications still authenticate to
+Config Server with `kube-sa-jwt`.
 
 ### simple-vault-server
 
@@ -691,10 +829,9 @@ Current `kube-edit-app` implementation note:
 7. [x] Add opt-in trusted proxy header normalization to `encjson-keys-server`.
 8. Reuse the same pattern in other services manually, without extracting a
    shared library too early.
-9. [ ] Keep `simple-idm-jwt` and `kube-sa-jwt` as the shared issuer kind names
+9. [x] Keep `simple-idm-jwt` and `kube-sa-jwt` as the shared issuer kind names
    in `encjson-keys-server`, `simple-config-server`, and `simple-vault-server`.
-10. [ ] Implement `kube-sa-jwt` policy support in `simple-vault-server` once its
-    API and policy model are ready.
+10. [x] Implement `kube-sa-jwt` policy support in `simple-vault-server`.
 
 Current `kube-sa-jwt` implementation note:
 
