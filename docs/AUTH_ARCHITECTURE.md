@@ -16,7 +16,7 @@ This contract applies to services such as:
 - `simple-idm-oauth2-proxy`
 - `simple-oci-registry`
 - `simple-config-server`
-- `simple-vault-server`
+- `simple-runtime-catalog`
 - `postgres-explorer`
 - `elastic-explorer`
 - `simple-artifacts-server`
@@ -255,8 +255,8 @@ The cross-service vocabulary is:
 ```yaml
 value_sources:
   local-vault:
-    provider: "simple-vault-server"
-    base_url: "http://127.0.0.1:8188/simple-vault-server"
+    provider: "simple-runtime-catalog"
+    base_url: "http://127.0.0.1:8188/simple-runtime-catalog"
     auth:
       kind: "local-service-token"
       token_file: "/absolute/path/to/service-token"
@@ -282,7 +282,7 @@ The client retains the last known good pair after refresh failures, rereads the
 token file for token rotation, and requires the provider URL to target loopback
 when `local-service-token` is used.
 
-`simple-vault-server` export profiles are stable output contracts identified by
+`simple-runtime-catalog` export profiles are stable output contracts identified by
 a tenant-local slug. They define output names, mappings and format, but they do
 not own a scope, environment or release. The consuming environment supplies the
 runtime projection. Consequently, `simple-config-server` calls the contextual
@@ -335,7 +335,7 @@ Operational diagnostics are a third channel, distinct from both browser UI and
 the full runtime API:
 
 ```text
-simple-vault-server resolved-values
+simple-runtime-catalog resolved-values
         -> simple-config-server runtime + diagnostic snapshots
         -> /api/v1/diagnostics/* with diagnostics:read
 ```
@@ -509,7 +509,7 @@ resource grants, not in the identity selector.
 `encjson-keys-server` currently expresses the same identity relationship in
 its generic policy binding model. It does not need to copy the direct
 `kube_sa_policies` configuration shape used by `simple-config-server` and
-`simple-vault-server`.
+`simple-runtime-catalog`.
 
 Examples:
 
@@ -522,8 +522,8 @@ encjson-keys-server:
   audience = encjson-keys-server
   policy = tenant/key read grants
 
-simple-vault-server:
-  audience = simple-vault-server
+simple-runtime-catalog:
+  audience = simple-runtime-catalog
   policy = tenant/scope/environment/release/render grants
 ```
 
@@ -735,7 +735,7 @@ Current `simple-config-server` implementation note:
 - validates Kubernetes ServiceAccount `sub` against namespace/serviceAccount claims
 - does not support legacy Basic Auth or `X-Client-Id` modes
 - supports named outbound `value_sources` with the
-  `simple-vault-server`/`local-service-token` combination for direct same-host
+  `simple-runtime-catalog`/`local-service-token` combination for direct same-host
   runtime value refresh
 - requires each environment to choose either `env_file` or `env_source`
 
@@ -743,16 +743,16 @@ This outbound use does not make `local-service-token` a public authentication
 method of `simple-config-server`. OpenShift applications still authenticate to
 Config Server with `kube-sa-jwt`.
 
-### simple-vault-server
+### simple-runtime-catalog
 
-`simple-vault-server` supports:
+`simple-runtime-catalog` supports:
 
 - trusted proxy `X-Auth-*` identity for its browser UI;
 - `simple-idm-jwt` and `kube-sa-jwt` for normal API access;
 - optional `local-service-token` for direct same-host bootstrap/export calls,
   such as rendering a scoped dotenv file for `simple-config-server`.
 
-The local token is configured and authorized by `simple-vault-server`; it is
+The local token is configured and authorized by `simple-runtime-catalog`; it is
 not issued by `simple-idm-server`.
 
 ### Projects that do not need local service tokens
@@ -830,8 +830,8 @@ Current `kube-edit-app` implementation note:
 8. Reuse the same pattern in other services manually, without extracting a
    shared library too early.
 9. [x] Keep `simple-idm-jwt` and `kube-sa-jwt` as the shared issuer kind names
-   in `encjson-keys-server`, `simple-config-server`, and `simple-vault-server`.
-10. [x] Implement `kube-sa-jwt` policy support in `simple-vault-server`.
+   in `encjson-keys-server`, `simple-config-server`, and `simple-runtime-catalog`.
+10. [x] Implement `kube-sa-jwt` policy support in `simple-runtime-catalog`.
 
 Current `kube-sa-jwt` implementation note:
 
