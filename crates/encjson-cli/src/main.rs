@@ -1,3 +1,4 @@
+mod examples;
 mod tui_edit;
 mod tui_register;
 
@@ -290,6 +291,14 @@ fn validate_scope_args(args: &ResolveArgs) -> Result<()> {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Show practical commands, input files and common workflows (does not execute them)
+    #[command(alias = "example")]
+    Examples {
+        /// Colorize examples automatically, always, or never
+        #[arg(long, value_enum, default_value_t = examples::ColorMode::Auto)]
+        color: examples::ColorMode,
+    },
+
     /// Generate shell completion script
     Completion {
         #[arg(value_enum)]
@@ -994,6 +1003,12 @@ fn current_bin_name(default_name: &str) -> String {
 
 fn run(command: Commands, debug: bool) -> Result<()> {
     match command {
+        Commands::Examples { color } => {
+            let stdout = io::stdout();
+            let use_color = examples::use_color(color, &stdout);
+            examples::write_examples(&mut stdout.lock(), use_color)?;
+            Ok(())
+        }
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
             let bin_name = current_bin_name("encjson");

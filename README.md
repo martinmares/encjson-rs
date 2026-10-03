@@ -1,5 +1,27 @@
 # encjson-rs
 
+## Practical CLI examples
+
+`encjson examples` (alias `encjson example`) prints a practical guide with named
+workflows, explanations, input JSON files (`FILE`) and commands (`SHELL`). It covers
+local API 3.0 setup, encryption/decryption, shell and dot-env exports, editing,
+rotation/migration, assets, sidecar transforms, Kubernetes Secrets, key providers,
+login/registration/synchronization and completion. The command only prints the
+guide: it does not load keys, create files or contact services.
+
+```sh
+encjson examples
+encjson examples --color never > encjson-examples.txt
+# From the source checkout:
+cargo run --locked -p encjson-cli -- examples
+```
+
+`--color auto` is the default: terminal output is colored, redirected output is
+plain text, and `NO_COLOR` or `TERM=dumb` disables automatic colors. Use
+`--color always` or `--color never` to override it. Run `encjson <command> --help`
+for the complete flag reference. Each workflow lists its assumptions; they are
+alternative examples rather than one script to execute from top to bottom.
+
 A small command-line tool for storing secrets in JSON files using public/private key encryption and modern authenticated encryption built on pure Rust crypto crates.
 
 It is designed so you can safely commit configuration files into Git, while keeping only the actual secrets encrypted, and still easily decrypt them at application startup.
