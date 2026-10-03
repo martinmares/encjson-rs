@@ -16,6 +16,32 @@ This repository now uses Cargo workspace layout:
 
 Goal: keep binaries thin and move reusable logic into shared crate(s) for next split (`encjson-keys-web`, etc.).
 
+## Build jobs
+
+The root `justfile` builds all four workspace binaries: `encjson`,
+`encjson-keys-ctl`, `encjson-keys-server` and `encjson-keys-web`.
+
+```sh
+just                 # list available jobs
+just build           # release build for the current platform
+just build-debug     # debug build for the current platform
+just build-macos     # macOS ARM64
+just build-linux     # Linux x86_64 MUSL, using cargo-zigbuild and Zig
+just build-windows   # Windows x86_64 MSVC, using cargo-xwin
+just fmt
+just check
+just test
+```
+
+Builds use the checked-in `Cargo.lock` (`--locked`). Native output is in
+`target/release/` or `target/debug/`; cross-platform release output is in
+`target/<target-triple>/release/`.
+
+Install `just` and the corresponding Rust target before using a target-specific
+job. Linux cross-compilation also requires `cargo-zigbuild` and Zig. Windows
+cross-compilation requires `cargo-xwin` and a compatible C/C++ cross-toolchain
+(Clang/LLVM); cargo-xwin downloads the required MSVC/Windows SDK components.
+
 ## Design Docs
 
 - Architecture anchor: `docs/ARCHITECTURE.md`
