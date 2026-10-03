@@ -1,7 +1,8 @@
 [package]
 name = "encjson-keys-web"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
+license.workspace = true
 
 [[bin]]
 name = "encjson-keys-web"

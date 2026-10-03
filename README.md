@@ -1254,6 +1254,26 @@ not needed by the Rust CLI for API 1.0 decryption or migration.
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
+## Commercial Support
+
+This software is provided under the MIT License and comes without
+warranty or free community support.
+
+Commercial support is available from **[DataLite](https://datalite.cz)**, including:
+
+- technical assistance,
+- verified releases,
+- bug fixes,
+- updates,
+- deployment assistance,
+- troubleshooting,
+- long-term maintenance.
+
+Contact [DataLite](https://datalite.cz) for commercial support options.
+
+External pull requests may be considered at the maintainer's discretion;
+review, acceptance and a response are not guaranteed.
+
 ## Author
 
 Martin Mareš

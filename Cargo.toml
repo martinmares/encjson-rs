@@ -8,8 +8,11 @@ members = [
 ]
 resolver = "2"
 
+[workspace.package]
+license = "MIT"
+
 [workspace.dependencies]
-dirs = "6.0"
+dirs = "7.0"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -17,7 +20,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 rand = "0.10"
 rand_core = "0.10"
 regex = "1"
@@ -30,10 +33,10 @@ x25519-dalek = { version = "3", features = ["static_secrets"] }
 ml-kem = "0.3.2"
 urlencoding = "2.1"
 chacha20poly1305 = { version = "0.11.0" }
-chacha20 = { version = "0.10.1", features = ["xchacha", "legacy"] }
+chacha20 = { version = "0.10.2", features = ["xchacha", "legacy"] }
 poly1305 = "0.9.1"
 subtle = "2.6.1"
-blake2 = "0.10"
+blake2 = "0.11"
 ratatui = "0.30"
 crossterm = "0.29"
 unicode-width = "0.2"
@@ -47,7 +50,7 @@ reqwest = { version = "0.13", features = ["json", "form", "blocking"] }
 openidconnect = "4.0"
 sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "macros", "migrate"] }
 dotenvy = "0.15"
-jsonwebtoken = "10"
+jsonwebtoken = "11"
 serde_yaml_ng = "0.10"
 tokio-rustls = "0.26"
 rustls = "0.23"
