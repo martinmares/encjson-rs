@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: encjson_test
+          POSTGRES_USER: encjson_test
+          POSTGRES_PASSWORD: encjson_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U encjson_test -d encjson_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgres://encjson_test:encjson_test@localhost:5432/encjson_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+          components: rustfmt
+      - name: Check shared version
+        run: python3 scripts/release.py check
+      - name: Test release scripts
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test workspace including PostgreSQL integration
+        run: cargo test --locked --workspace --all-targets

@@ -9,6 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
+version = "0.9.1"
 license = "MIT"
 
 [workspace.dependencies]
@@ -60,3 +61,6 @@ hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"]
 x509-parser = "0.18"
 tower-service = "0.3"
 encjson-core = { path = "crates/encjson-core" }
+
+[profile.release]
+strip = "symbols"

@@ -1,0 +1,120 @@
+stages: [verify, build, release]
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+default:
+  image: rust:1.99.0-bookworm
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends python3 curl jq ca-certificates cmake clang lld
+
+variables:
+  GIT_DEPTH: "0"
+  CARGO_HOME: "$CI_PROJECT_DIR/.cache/cargo"
+  RUN_MACOS_RELEASE: "false"
+
+cache:
+  key:
+    prefix: "rust-1.99-$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"
+    files: [Cargo.lock]
+  paths:
+    - .cache/cargo/registry/
+    - .cache/cargo/git/
+
+.release_rules:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+      changes: [VERSION]
+
+check:
+  stage: verify
+  services:
+    - name: postgres:16-alpine
+      alias: postgres
+  variables:
+    POSTGRES_DB: encjson_test
+    POSTGRES_USER: encjson_test
+    POSTGRES_PASSWORD: encjson_test
+    DATABASE_URL: postgres://encjson_test:encjson_test@postgres:5432/encjson_test
+  script:
+    - python3 scripts/release.py check
+    - python3 -m unittest discover -s scripts -p 'test_*.py'
+    - rustup component add rustfmt
+    - cargo fmt --all -- --check
+    - cargo test --locked --workspace --all-targets
+
+build_linux:
+  extends: .release_rules
+  stage: build
+  timeout: 1h
+  script:
+    - python3 scripts/release.py check --release
+    - apt-get install -y --no-install-recommends python3-venv
+    - python3 -m venv .cache/build-tools
+    - .cache/build-tools/bin/pip install cargo-zigbuild==0.21.5 ziglang==0.16.0
+    - export PATH="$CI_PROJECT_DIR/.cache/build-tools/bin:$PATH"
+    - rustup target add x86_64-unknown-linux-musl
+    - cargo zigbuild --locked --release --workspace --target x86_64-unknown-linux-musl
+    - python3 scripts/release.py package x86_64-unknown-linux-musl
+  artifacts:
+    paths: [dist/release/]
+    expire_in: 7 days
+
+build_windows:
+  extends: .release_rules
+  stage: build
+  timeout: 1h
+  script:
+    - python3 scripts/release.py check --release
+    - apt-get install -y --no-install-recommends python3-venv
+    - python3 -m venv .cache/build-tools
+    - .cache/build-tools/bin/pip install cargo-xwin==0.19.2
+    - export PATH="$CI_PROJECT_DIR/.cache/build-tools/bin:$PATH"
+    - rustup target add x86_64-pc-windows-msvc
+    - cargo xwin build --locked --release --workspace --target x86_64-pc-windows-msvc
+    - python3 scripts/release.py package x86_64-pc-windows-msvc
+  artifacts:
+    paths: [dist/release/]
+    expire_in: 7 days
+
+# Optional Apple Silicon shell runner, with rustup, Xcode CLI tools and Python 3.11+.
+build_macos:
+  stage: build
+  tags: [macos-arm64]
+  before_script: []
+  cache: []
+  timeout: 1h
+  rules:
+    - if: '$RUN_MACOS_RELEASE == "true" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "web"'
+    - if: '$RUN_MACOS_RELEASE == "true" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+      changes: [VERSION]
+  script:
+    - python3 scripts/release.py check --release
+    - rustup target add aarch64-apple-darwin
+    - cargo build --locked --release --workspace --target aarch64-apple-darwin
+    - python3 scripts/release.py package aarch64-apple-darwin
+  artifacts:
+    paths: [dist/release/]
+    expire_in: 7 days
+
+publish_release:
+  extends: .release_rules
+  stage: release
+  resource_group: release
+  needs:
+    - job: check
+      artifacts: false
+    - job: build_linux
+    - job: build_windows
+    - job: build_macos
+      optional: true
+  script:
+    - python3 scripts/release.py prepare
+    - python3 scripts/release.py checksums
+    - bash scripts/publish_gitlab.sh
+  artifacts:
+    paths: [dist/release/SHA256SUMS, dist/release_notes.md]
+    expire_in: 30 days

@@ -120,3 +120,8 @@ Icon[
 Network Trash Folder
 Temporary Items
 .apdisk
+
+# CI and release output
+/dist/
+/.cache/
+**/__pycache__/

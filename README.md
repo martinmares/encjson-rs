@@ -64,6 +64,21 @@ job. Linux cross-compilation also requires `cargo-zigbuild` and Zig. Windows
 cross-compilation requires `cargo-xwin` and a compatible C/C++ cross-toolchain
 (Clang/LLVM); cargo-xwin downloads the required MSVC/Windows SDK components.
 
+## CI and releases
+
+All workspace crates inherit one shared version through `version.workspace = true`.
+`VERSION` triggers a release when changed on the main/default branch:
+
+```sh
+just release-version 0.10.0  # update VERSION, the shared Cargo version and Cargo.lock
+just check-version
+```
+
+Commit these three files together. GitHub and GitLab verify the versions, run
+workspace tests with PostgreSQL, and publish archives containing all four
+binaries with release notes and SHA-256 checksums. See [Releasing](docs/RELEASING.md)
+for platform coverage, GitLab runner setup and manual retries.
+
 ## Design Docs
 
 - Architecture anchor: `docs/ARCHITECTURE.md`

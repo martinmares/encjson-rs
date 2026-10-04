@@ -382,7 +382,7 @@ mod tests {
     use axum::body::to_bytes;
     use axum::extract::{Path, State};
     use axum::http::HeaderMap;
-    use encjson_core::crypto::{generate_key_pair, generate_v3_key_bundle};
+    use encjson_core::crypto::{generate_pair_consistent_key_pair, generate_v3_key_bundle};
     use encjson_core::key_sources::KeySourceKind;
     use encjson_core::recipient::PrivateBundle;
     use std::fs;
@@ -512,7 +512,7 @@ mod tests {
         let note = "bootstrap integration test";
         let keydir = std::env::temp_dir().join(format!("encjson-bootstrap-{unique}"));
         fs::create_dir_all(&keydir)?;
-        let (private_hex, public_hex) = generate_key_pair();
+        let (private_hex, public_hex) = generate_pair_consistent_key_pair();
         fs::write(keydir.join("public.key"), format!("{public_hex}\n"))?;
         fs::write(keydir.join("private.key"), format!("{private_hex}\n"))?;
 

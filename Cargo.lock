@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "encjson-cli"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "encjson-core"
-version = "0.6.3"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "encjson-keys-ctl"
-version = "0.6.8"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1147,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "encjson-keys-server"
-version = "0.2.1"
+version = "0.9.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1176,7 +1176,7 @@ dependencies = [
 
 [[package]]
 name = "encjson-keys-web"
-version = "0.2.1"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-stream",

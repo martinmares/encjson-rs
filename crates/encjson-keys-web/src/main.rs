@@ -34,7 +34,11 @@ enum AuthMode {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "encjson-keys-web", about = "Web UI for encjson-keys-server")]
+#[command(
+    name = "encjson-keys-web",
+    version,
+    about = "Web UI for encjson-keys-server"
+)]
 struct Args {
     #[arg(long, env = "ENCJSON_KEYS_WEB_BIND", default_value = "127.0.0.1:8189")]
     bind: String,

@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.0'
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Check release version and existing tag
+        run: python scripts/release.py check --release
+      - name: Install Linux cross-compilation tools
+        if: runner.os == 'Linux'
+        run: python -m pip install cargo-zigbuild==0.21.5 ziglang==0.16.0
+      - name: Build Linux binaries
+        if: runner.os == 'Linux'
+        run: cargo zigbuild --locked --release --workspace --target "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+      - name: Build native binaries
+        if: runner.os != 'Linux'
+        run: cargo build --locked --release --workspace --target "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+      - name: Package all four binaries
+        run: python scripts/release.py package "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist/release
+          merge-multiple: true
+      - name: Generate release notes and checksums
+        run: |
+          python3 scripts/release.py prepare
+          python3 scripts/release.py checksums
+      - name: Publish GitHub release
+        run: bash scripts/publish_github.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

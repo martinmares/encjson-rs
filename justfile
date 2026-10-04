@@ -34,3 +34,11 @@ check:
 
 test:
     cargo test --locked --workspace --all-targets
+
+# Set the shared release version and refresh Cargo.lock (Python 3.11+).
+release-version version:
+    python3 scripts/release.py bump {{ quote(version) }}
+
+# Verify VERSION, workspace manifests and Cargo.lock agree.
+check-version:
+    python3 scripts/release.py check

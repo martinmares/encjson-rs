@@ -2,7 +2,11 @@ use clap::Parser;
 use encjson_core::key_sources::KeySourceKind;
 
 #[derive(Debug, Parser)]
-#[command(name = "encjson-keys-server", about = "Keys server for encjson")]
+#[command(
+    name = "encjson-keys-server",
+    version,
+    about = "Keys server for encjson"
+)]
 pub(crate) struct Args {
     #[arg(long, env = "DATABASE_URL")]
     pub(crate) database_url: Option<String>,
