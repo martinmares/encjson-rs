@@ -65,12 +65,18 @@ the previous reachable release tag. `SHA256SUMS` covers all published archives.
 GitHub marks versions containing a prerelease suffix as prereleases; GitLab
 exposes them as ordinary releases with the suffix in the name and tag.
 
-GitHub assembles archives on hosted runners, creates a draft release, uploads
-assets, then publishes it. Only the publishing job has `contents: write`; it
+GitHub assembles archives on hosted runners, creates or verifies the Git tag
+on the release commit, creates a draft release, uploads assets, then publishes
+it. Explicit tag creation allows commit verification before the draft is
+published and supports retries of existing drafts. Only the publishing job has
+`contents: write`; it
 uses the built-in `GITHUB_TOKEN`. No extra token is needed. Retrying the same
 commit can replace its assets.
 
-GitLab builds Linux and Windows with a Linux Docker runner. Archives are passed
+GitLab builds Linux and Windows with a Linux Docker runner. The Windows job
+installs `llvm` in addition to Clang and LLD: C/C++ dependencies require
+`llvm-lib` to create MSVC static libraries. It checks for `clang`, `lld-link`
+and `llvm-lib` before compiling. Archives are passed
 as short-lived CI artifacts, then uploaded individually to the persistent
 Generic Package Registry. Release links point to registry files, so they keep
 working after CI artifacts expire. The built-in `CI_JOB_TOKEN` authenticates

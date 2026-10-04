@@ -69,7 +69,8 @@ build_windows:
   timeout: 1h
   script:
     - python3 scripts/release.py check --release
-    - apt-get install -y --no-install-recommends python3-venv
+    - apt-get install -y --no-install-recommends python3-venv llvm
+    - for tool in clang lld-link llvm-lib; do command -v "$tool" || exit 1; done
     - python3 -m venv .cache/build-tools
     - .cache/build-tools/bin/pip install cargo-xwin==0.19.2
     - export PATH="$CI_PROJECT_DIR/.cache/build-tools/bin:$PATH"
