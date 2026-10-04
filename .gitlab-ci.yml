@@ -13,7 +13,6 @@ default:
 variables:
   GIT_DEPTH: "0"
   CARGO_HOME: "$CI_PROJECT_DIR/.cache/cargo"
-  RUN_MACOS_RELEASE: "false"
 
 cache:
   key:
@@ -81,26 +80,6 @@ build_windows:
     paths: [dist/release/]
     expire_in: 7 days
 
-# Optional Apple Silicon shell runner, with rustup, Xcode CLI tools and Python 3.11+.
-build_macos:
-  stage: build
-  tags: [macos-arm64]
-  before_script: []
-  cache: []
-  timeout: 1h
-  rules:
-    - if: '$RUN_MACOS_RELEASE == "true" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "web"'
-    - if: '$RUN_MACOS_RELEASE == "true" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
-      changes: [VERSION]
-  script:
-    - python3 scripts/release.py check --release
-    - rustup target add aarch64-apple-darwin
-    - cargo build --locked --release --workspace --target aarch64-apple-darwin
-    - python3 scripts/release.py package aarch64-apple-darwin
-  artifacts:
-    paths: [dist/release/]
-    expire_in: 7 days
-
 publish_release:
   extends: .release_rules
   stage: release
@@ -110,8 +89,6 @@ publish_release:
       artifacts: false
     - job: build_linux
     - job: build_windows
-    - job: build_macos
-      optional: true
   script:
     - python3 scripts/release.py prepare
     - python3 scripts/release.py checksums

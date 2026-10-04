@@ -57,7 +57,7 @@ are embedded in the keys server by SQLx.
 | Platform | Archive | GitHub | GitLab |
 | --- | --- | --- | --- |
 | Linux x86_64 MUSL | `encjson-X.Y.Z-linux-amd64.tar.gz` | Yes | Yes |
-| macOS Apple Silicon | `encjson-X.Y.Z-darwin-arm64.tar.gz` | Yes | Optional runner |
+| macOS Apple Silicon | `encjson-X.Y.Z-darwin-arm64.tar.gz` | Yes | No |
 | Windows x86_64 MSVC | `encjson-X.Y.Z-windows-amd64.zip` | Yes | Yes, cross-compiled |
 
 These targets match the existing `justfile`. Release notes list commits since
@@ -85,12 +85,7 @@ release creation under your project's protected-tag policy. On instances that
 disable duplicate generic package files, adjust that setting if same-commit
 retries should replace uploads.
 
-To include macOS on GitLab, register an Apple Silicon **shell executor** runner
-with tag `macos-arm64`, install rustup, Xcode command-line tools and Python
-3.11+, and set CI/CD variable `RUN_MACOS_RELEASE=true`. Without that variable,
-macOS is omitted and Linux/Windows releases proceed. When enabled, publication
-waits for the macOS build too. The macOS job does not use the Linux container's
-`before_script`.
+Apple Silicon macOS releases are built and published on GitHub only.
 
 ## Local verification and packaging
 
