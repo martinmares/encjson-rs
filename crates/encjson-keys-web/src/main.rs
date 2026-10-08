@@ -145,6 +145,8 @@ enum AccessKind {
     Api,
 }
 
+type WebResult<T> = std::result::Result<T, Box<Response>>;
+
 #[derive(Debug, Deserialize)]
 struct OidcCallbackQuery {
     code: Option<String>,
@@ -332,14 +334,14 @@ async fn openapi_yaml() -> impl IntoResponse {
 
 async fn ui_dashboard(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(resp) = ensure_user(&state, &headers, AccessKind::Ui).await {
-        return resp;
+        return *resp;
     }
     Html(views::dashboard_html()).into_response()
 }
 
 async fn ui_keys(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(resp) = ensure_user(&state, &headers, AccessKind::Ui).await {
-        return resp;
+        return *resp;
     }
     Html(views::keys_html()).into_response()
 }
@@ -347,7 +349,7 @@ async fn ui_keys(State(state): State<AppState>, headers: HeaderMap) -> Response 
 async fn ui_bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Ui).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !is_admin_user(&user) {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -357,14 +359,14 @@ async fn ui_bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Resp
 
 async fn ui_requests(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(resp) = ensure_user(&state, &headers, AccessKind::Ui).await {
-        return resp;
+        return *resp;
     }
     Html(views::requests_html()).into_response()
 }
 
 async fn ui_tenants(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(resp) = ensure_user(&state, &headers, AccessKind::Ui).await {
-        return resp;
+        return *resp;
     }
     Html(views::tenants_html()).into_response()
 }
@@ -591,7 +593,7 @@ async fn ui_logout(State(state): State<AppState>, headers: HeaderMap) -> Respons
 async fn api_me(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     Json(MeResponse {
         auth_mode: match state.auth_mode {
@@ -607,7 +609,7 @@ async fn api_me(State(state): State<AppState>, headers: HeaderMap) -> Response {
 async fn api_events(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let token = user.access_token.clone();
@@ -634,7 +636,7 @@ async fn api_bootstrap_import(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if !is_admin_user(&user) {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -649,7 +651,7 @@ async fn api_bootstrap_import(
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -660,13 +662,13 @@ async fn api_keys(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match proxy_get::<Vec<KeyItem>>(&state, "/api/v1/keys", &query, user.access_token.as_deref())
         .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -677,12 +679,12 @@ async fn api_key_detail(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let path = format!("/api/v1/keys/{}", public_hex);
     match proxy_get::<KeyItem>(&state, &path, &HashMap::new(), user.access_token.as_deref()).await {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -694,7 +696,7 @@ async fn api_patch_key(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let path = format!("/api/v1/keys/{}", public_hex);
     match proxy_json_method::<KeyPatch, Value>(
@@ -707,14 +709,14 @@ async fn api_patch_key(
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
 async fn api_reencrypt(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match proxy_json_method::<Value, ReencryptResponse>(
         &state,
@@ -726,7 +728,7 @@ async fn api_reencrypt(State(state): State<AppState>, headers: HeaderMap) -> Res
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -737,7 +739,7 @@ async fn api_requests(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match proxy_get::<Vec<RequestItem>>(
         &state,
@@ -748,7 +750,7 @@ async fn api_requests(
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -759,7 +761,7 @@ async fn api_create_request(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match proxy_json_method::<RequestCreate, Value>(
         &state,
@@ -771,7 +773,7 @@ async fn api_create_request(
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -783,7 +785,7 @@ async fn api_approve_request(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let path = format!("/api/v1/requests/{}/approve", id);
     match proxy_json_method::<RequestDecision, Value>(
@@ -796,7 +798,7 @@ async fn api_approve_request(
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -808,7 +810,7 @@ async fn api_reject_request(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let path = format!("/api/v1/requests/{}/reject", id);
     match proxy_json_method::<RequestDecision, Value>(
@@ -821,14 +823,14 @@ async fn api_reject_request(
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
 async fn api_tenants(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match proxy_get::<Vec<TenantItem>>(
         &state,
@@ -839,7 +841,7 @@ async fn api_tenants(State(state): State<AppState>, headers: HeaderMap) -> Respo
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -850,7 +852,7 @@ async fn api_create_tenant(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     match proxy_json_method::<TenantCreate, Value>(
         &state,
@@ -862,7 +864,7 @@ async fn api_create_tenant(
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -874,7 +876,7 @@ async fn api_rename_tenant(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let path = format!("/api/v1/tenants/{}", name);
     match proxy_json_method::<TenantRename, Value>(
@@ -887,7 +889,7 @@ async fn api_rename_tenant(
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -898,7 +900,7 @@ async fn api_delete_tenant(
 ) -> Response {
     let user = match ensure_user(&state, &headers, AccessKind::Api).await {
         Ok(u) => u,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     let path = format!("/api/v1/tenants/{}", name);
     match proxy_no_body(
@@ -910,7 +912,7 @@ async fn api_delete_tenant(
     .await
     {
         Ok(v) => Json(v).into_response(),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     }
 }
 
@@ -918,7 +920,7 @@ async fn ensure_user(
     state: &AppState,
     headers: &HeaderMap,
     access: AccessKind,
-) -> Result<UserContext, Response> {
+) -> WebResult<UserContext> {
     match state.auth_mode {
         AuthMode::Local => Ok(UserContext {
             subject: "local-user".to_string(),
@@ -927,22 +929,22 @@ async fn ensure_user(
         }),
         AuthMode::Oidc => {
             let Some(oidc) = &state.oidc else {
-                return Err(
+                return Err(Box::new(
                     (StatusCode::INTERNAL_SERVER_ERROR, "OIDC is not configured").into_response(),
-                );
+                ));
             };
 
             let Some(sid) = get_cookie(headers, "encjson_keys_web") else {
-                return Err(unauthorized_response(access));
+                return Err(Box::new(unauthorized_response(access)));
             };
 
             let mut sessions = oidc.sessions.lock().await;
             let Some(sess) = sessions.get(&sid).cloned() else {
-                return Err(unauthorized_response(access));
+                return Err(Box::new(unauthorized_response(access)));
             };
             if Instant::now() > sess.expires_at {
                 sessions.remove(&sid);
-                return Err(unauthorized_response(access));
+                return Err(Box::new(unauthorized_response(access)));
             }
 
             Ok(UserContext {
@@ -981,7 +983,7 @@ async fn proxy_get<T: serde::de::DeserializeOwned>(
     path: &str,
     query: &HashMap<String, String>,
     access_token: Option<&str>,
-) -> Result<T, Response> {
+) -> WebResult<T> {
     let mut url = format!("{}{}", state.keys_server_base, path);
     if !query.is_empty() {
         let qp = query
@@ -997,7 +999,7 @@ async fn proxy_get<T: serde::de::DeserializeOwned>(
         req = req.bearer_auth(token);
     }
 
-    let resp = req.send().await.map_err(internal_error)?;
+    let resp = req.send().await.map_err(|e| Box::new(internal_error(e)))?;
     handle_json_response(resp).await
 }
 
@@ -1007,14 +1009,14 @@ async fn proxy_json_method<B: Serialize, T: serde::de::DeserializeOwned>(
     path: &str,
     body: &B,
     access_token: Option<&str>,
-) -> Result<T, Response> {
+) -> WebResult<T> {
     let url = format!("{}{}", state.keys_server_base, path);
     let mut req = state.http.request(method, url).json(body);
     if let Some(token) = access_token {
         req = req.bearer_auth(token);
     }
 
-    let resp = req.send().await.map_err(internal_error)?;
+    let resp = req.send().await.map_err(|e| Box::new(internal_error(e)))?;
     handle_json_response(resp).await
 }
 
@@ -1023,28 +1025,28 @@ async fn proxy_no_body(
     method: reqwest::Method,
     path: &str,
     access_token: Option<&str>,
-) -> Result<Value, Response> {
+) -> WebResult<Value> {
     let url = format!("{}{}", state.keys_server_base, path);
     let mut req = state.http.request(method, url);
     if let Some(token) = access_token {
         req = req.bearer_auth(token);
     }
 
-    let resp = req.send().await.map_err(internal_error)?;
+    let resp = req.send().await.map_err(|e| Box::new(internal_error(e)))?;
     handle_json_response(resp).await
 }
 
 async fn handle_json_response<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
-) -> Result<T, Response> {
+) -> WebResult<T> {
     let status = map_status(resp.status());
-    let body = resp.text().await.map_err(internal_error)?;
+    let body = resp.text().await.map_err(|e| Box::new(internal_error(e)))?;
     if !status.is_success() {
-        return Err((status, body).into_response());
+        return Err(Box::new((status, body).into_response()));
     }
     serde_json::from_str::<T>(&body)
         .with_context(|| format!("invalid upstream json body: {}", body))
-        .map_err(internal_error)
+        .map_err(|e| Box::new(internal_error(e)))
 }
 
 fn map_status(status: reqwest::StatusCode) -> StatusCode {

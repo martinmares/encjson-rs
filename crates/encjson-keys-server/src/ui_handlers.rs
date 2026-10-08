@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use axum::{
     extract::{Form, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Redirect},
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -231,11 +231,11 @@ pub(crate) async fn ui_logout(
     (StatusCode::FOUND, h, "").into_response()
 }
 
-async fn ui_require(state: &AppState, headers: &HeaderMap) -> Result<UiSession, Response> {
+async fn ui_require(state: &AppState, headers: &HeaderMap) -> Result<UiSession, Redirect> {
     if let Some(sess) = ui_session(state, headers).await {
         return Ok(sess);
     }
-    Err(Redirect::to("/ui/login").into_response())
+    Err(Redirect::to("/ui/login"))
 }
 
 pub(crate) async fn ui_keys(
@@ -244,7 +244,7 @@ pub(crate) async fn ui_keys(
 ) -> impl IntoResponse {
     let _ = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     let body = r#"<div id="list" hx-get="/ui/keys/list" hx-trigger="load"></div>
 <div class="mt-3">
@@ -262,7 +262,7 @@ pub(crate) async fn ui_keys_list(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     let mut rows = String::new();
     let mut builder = QueryBuilder::<Postgres>::new(
@@ -314,7 +314,7 @@ pub(crate) async fn ui_key_detail(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -367,7 +367,7 @@ pub(crate) async fn ui_key_edit(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -397,7 +397,7 @@ pub(crate) async fn ui_requests(
 ) -> impl IntoResponse {
     let _ = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     let body = r#"
 <div class="mb-3">
@@ -425,7 +425,7 @@ pub(crate) async fn ui_request_create(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin && !sess.is_scoped {
         return (StatusCode::FORBIDDEN, "role not allowed").into_response();
@@ -472,7 +472,7 @@ pub(crate) async fn ui_requests_list(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     let rows = if sess.is_admin {
         sqlx::query_as::<_, RequestRow>(
@@ -535,7 +535,7 @@ pub(crate) async fn ui_request_approve(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -611,7 +611,7 @@ pub(crate) async fn ui_request_reject(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -633,7 +633,7 @@ pub(crate) async fn ui_tenants(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -659,7 +659,7 @@ pub(crate) async fn ui_tenants_list(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -704,7 +704,7 @@ pub(crate) async fn ui_tenant_add(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -724,7 +724,7 @@ pub(crate) async fn ui_tenant_rename(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -754,7 +754,7 @@ pub(crate) async fn ui_tenant_delete(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
@@ -772,7 +772,7 @@ pub(crate) async fn ui_reencrypt(
 ) -> impl IntoResponse {
     let sess = match ui_require(&state, &headers).await {
         Ok(s) => s,
-        Err(resp) => return resp,
+        Err(resp) => return resp.into_response(),
     };
     if !sess.is_admin {
         return (StatusCode::FORBIDDEN, "admin required").into_response();
